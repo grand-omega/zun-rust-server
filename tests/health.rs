@@ -30,6 +30,52 @@ async fn health_returns_ok_and_version() {
 }
 
 #[tokio::test]
+async fn response_carries_x_request_id() {
+    let app = common::test_app().await;
+    let resp = app
+        .router
+        .oneshot(
+            Request::builder()
+                .uri("/api/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let id = resp
+        .headers()
+        .get("x-request-id")
+        .expect("x-request-id set on response")
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(id.len(), 36, "uuid v4 string length");
+}
+
+#[tokio::test]
+async fn client_supplied_request_id_is_propagated() {
+    let app = common::test_app().await;
+    let resp = app
+        .router
+        .oneshot(
+            Request::builder()
+                .uri("/api/health")
+                .header("x-request-id", "client-supplied-id-123")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let id = resp
+        .headers()
+        .get("x-request-id")
+        .expect("x-request-id set on response")
+        .to_str()
+        .unwrap();
+    assert_eq!(id, "client-supplied-id-123");
+}
+
+#[tokio::test]
 async fn unknown_route_returns_404() {
     let app = common::test_app().await;
     let resp = app

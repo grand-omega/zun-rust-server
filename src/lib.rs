@@ -13,10 +13,17 @@ pub use state::AppState;
 use axum::{
     Json, Router,
     extract::DefaultBodyLimit,
+    http::{Request, header},
     middleware,
     routing::{get, post},
 };
 use serde_json::json;
+use tower::ServiceBuilder;
+use tower_http::{
+    request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
+    sensitive_headers::SetSensitiveRequestHeadersLayer,
+    trace::TraceLayer,
+};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -39,9 +46,41 @@ pub fn router(state: AppState) -> Router {
         ))
         .with_state(state);
 
-    Router::new()
+    let app = Router::new()
         .route("/api/health", get(health))
-        .merge(authed)
+        .merge(authed);
+
+    // Middleware stack applied to every route:
+    // 1. Mark `Authorization` sensitive so header-debug redacts it
+    //    (defense-in-depth — default TraceLayer doesn't log headers,
+    //    but custom loggers added later will respect the mark).
+    // 2. Generate an `x-request-id` if the client didn't send one.
+    // 3. Open a `request` span per request with method/uri/id — every
+    //    `tracing::*` call inside a handler inherits these fields.
+    // 4. Copy the id onto the response so clients can correlate.
+    app.layer(
+        ServiceBuilder::new()
+            .layer(SetSensitiveRequestHeadersLayer::new(std::iter::once(
+                header::AUTHORIZATION,
+            )))
+            .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
+            .layer(
+                TraceLayer::new_for_http().make_span_with(|req: &Request<_>| {
+                    let id = req
+                        .headers()
+                        .get("x-request-id")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("");
+                    tracing::info_span!(
+                        "request",
+                        id = %id,
+                        method = %req.method(),
+                        uri = %req.uri(),
+                    )
+                }),
+            )
+            .layer(PropagateRequestIdLayer::x_request_id()),
+    )
 }
 
 async fn health() -> Json<serde_json::Value> {
