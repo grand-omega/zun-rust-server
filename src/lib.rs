@@ -5,6 +5,7 @@ pub mod error;
 mod handlers;
 pub mod prompts;
 pub mod state;
+pub mod workflow;
 
 pub use config::Config;
 pub use error::AppError;

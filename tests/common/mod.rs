@@ -51,6 +51,7 @@ pub async fn test_app() -> TestApp {
         db: pool,
         config,
         prompts: Arc::new(prompts_map),
+        workflows: Arc::new(std::collections::HashMap::new()),
     };
     TestApp {
         router: router(state),
