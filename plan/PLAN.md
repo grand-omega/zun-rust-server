@@ -1119,29 +1119,31 @@ Workflow templates live in project-zun (the source of truth). The server reads t
 
 Build strictly in this order. Each milestone is independently testable with `curl`.
 
-### Milestone 1 — Hello world axum server
+### Milestone 1 — Hello world axum server ✓
 
-- [x] `cargo new --bin zun-rust-server` (already done)
-- [ ] Add minimal dependencies: `axum`, `tokio`, `tracing`, `tracing-subscriber`
-- [ ] `main.rs` with an axum router serving `GET /api/health` → `{"status":"ok"}`
-- [ ] Listen on `127.0.0.1:8080` for now
-- [ ] Set up `tracing-subscriber` with env filter
-- [ ] `cargo run` and verify with `curl localhost:8080/api/health`
+- [x] `cargo new --bin zun-rust-server`
+- [x] Add minimal dependencies: `axum`, `tokio`, `tracing`, `tracing-subscriber`, `serde_json`
+- [x] Library + binary split: `src/lib.rs` exposes `router()` and `VERSION`; `src/main.rs` is the binary entry
+- [x] `GET /api/health` → `{"status":"ok","version":"0.1.0"}`
+- [x] Listen on `127.0.0.1:8080`
+- [x] Set up `tracing-subscriber` with env filter (default `zun_rust_server=info,tower_http=info`)
+- [x] Integration tests (`tests/health.rs`): asserts 200 + body shape; asserts 404 on unknown route
+- [x] Pre-commit hook at `.git/hooks/pre-commit`: gates commits on `cargo fmt --all -- --check` and `cargo clippy --all-targets -- -D warnings`
 
-**Done when:** curl returns `{"status":"ok"}`.
+**Done.** All tests pass; both commit gates clean on the tree.
 
-### Milestone 2 — Config, state, and SQLite
+### Milestone 2 — Config, state, and SQLite ✓
 
-- [ ] Add `sqlx`, `serde`, `toml`, `uuid`, `chrono`
-- [ ] Create `Config` struct (loaded from `config.toml` + env)
-- [ ] Create `AppState` with `SqlitePool`
-- [ ] Create migrations/ directory with the initial schema
-- [ ] Run migrations on startup, set WAL mode
-- [ ] Add debug endpoint `POST /api/debug/job` that inserts a row with random UUID
-- [ ] Add debug endpoint `GET /api/debug/jobs` that returns all rows
-- [ ] Verify with curl: insert a few rows, list them
+- [x] Add `sqlx` (no default features; `runtime-tokio,sqlite,macros,migrate,chrono`), `serde`, `uuid`, `chrono`, `anyhow`; `tempfile` as dev-dep. TOML config crate deferred — env is enough for now.
+- [x] `Config` struct loaded from env vars: `ZUN_DATA_DIR` (default `./data`), `ZUN_BIND` (default `127.0.0.1:8080`)
+- [x] `AppState { db: SqlitePool, config: Config }` cloneable, passed via `Router::with_state`
+- [x] `migrations/20260422000000_init.sql` with `jobs` table + three indexes (STRICT)
+- [x] `db::init()` opens pool with `SqliteConnectOptions` (WAL, NORMAL sync, foreign_keys, busy_timeout=5s) and runs migrations at startup
+- [x] Runtime `sqlx::query`/`sqlx::query_as` (not macros) — no build-time DB metadata needed while schema is in flux. Upgrade to compile-time macros in M5+.
+- [x] Debug endpoints: `POST /api/debug/job` returns `{id}`; `GET /api/debug/jobs` returns a list of `{id, status, prompt_id, created_at}` newest-first
+- [x] Integration tests (`tests/jobs.rs`, `tests/common/mod.rs`): each test gets a fresh temp-dir SQLite via `test_app()`. 3 scenarios covered (empty list, insert+list, ordering). All 5 tests across the suite pass.
 
-**Done when:** you can insert and list jobs via curl, data persists across restarts.
+**Done.** Two new source modules (`config.rs`, `db.rs`, `state.rs`, `handlers.rs`), one migration. `config.toml` parsing will return when we need a non-env setting.
 
 ### Milestone 3 — Bearer auth middleware
 
@@ -1592,10 +1594,21 @@ Claude can't talk to your actual ComfyUI instance. For Milestone 5, use a wiremo
 
 - `thiserror` for library errors, `anyhow` only inside binary boundaries if ever
 - `tracing`, never `println!` or `log` crate
-- `sqlx::query!` macros for compile-time checked queries; `query_as!` for typed rows
+- `sqlx::query!` macros for compile-time checked queries once the schema stabilizes; runtime `sqlx::query` is fine during early milestones to avoid needing build-time DB metadata
 - `Result<T, AppError>` everywhere; avoid `Box<dyn Error>`
 - snake_case for JSON fields (matches Rust field names; no `serde(rename)` noise)
 - Tabs: never. 4 spaces, rustfmt default
+
+### Commit gate
+
+Local `.git/hooks/pre-commit` (untracked, one-time setup) enforces:
+
+```
+cargo fmt --all -- --check
+cargo clippy --all-targets -- -D warnings
+```
+
+Both must pass, or the commit is rejected. Bypass with `git commit --no-verify` only when intentional (e.g., committing a WIP snapshot). Fresh clones re-create the hook by hand — or we version it under `.githooks/` + `git config core.hooksPath .githooks` once there's a second contributor.
 
 ### When in doubt
 

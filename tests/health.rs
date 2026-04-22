@@ -4,12 +4,20 @@ use axum::{
 };
 use http_body_util::BodyExt;
 use tower::ServiceExt;
-use zun_rust_server::router;
+
+mod common;
 
 #[tokio::test]
 async fn health_returns_ok_and_version() {
-    let resp = router()
-        .oneshot(Request::builder().uri("/api/health").body(Body::empty()).unwrap())
+    let app = common::test_app().await;
+    let resp = app
+        .router
+        .oneshot(
+            Request::builder()
+                .uri("/api/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
 
@@ -23,8 +31,15 @@ async fn health_returns_ok_and_version() {
 
 #[tokio::test]
 async fn unknown_route_returns_404() {
-    let resp = router()
-        .oneshot(Request::builder().uri("/api/nope").body(Body::empty()).unwrap())
+    let app = common::test_app().await;
+    let resp = app
+        .router
+        .oneshot(
+            Request::builder()
+                .uri("/api/nope")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);

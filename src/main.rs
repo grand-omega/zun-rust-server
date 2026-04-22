@@ -1,9 +1,8 @@
-use std::net::SocketAddr;
 use tracing_subscriber::{EnvFilter, fmt};
-use zun_rust_server::router;
+use zun_rust_server::{AppState, Config, db, router};
 
 #[tokio::main]
-async fn main() {
+async fn main() -> anyhow::Result<()> {
     fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env()
@@ -11,11 +10,18 @@ async fn main() {
         )
         .init();
 
-    let addr: SocketAddr = "127.0.0.1:8080".parse().expect("valid bind address");
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .expect("bind 127.0.0.1:8080");
-    tracing::info!(%addr, "zun-rust-server listening");
+    let config = Config::from_env();
+    tracing::info!(data_dir = %config.data_dir.display(), bind = %config.bind_addr, "starting");
 
-    axum::serve(listener, router()).await.expect("server error");
+    let pool = db::init(&config.data_dir).await?;
+    let state = AppState {
+        db: pool,
+        config: config.clone(),
+    };
+
+    let listener = tokio::net::TcpListener::bind(&config.bind_addr).await?;
+    tracing::info!(addr = %config.bind_addr, "zun-rust-server listening");
+
+    axum::serve(listener, router(state)).await?;
+    Ok(())
 }
