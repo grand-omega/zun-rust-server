@@ -1,15 +1,11 @@
-use axum::{Json, extract::State, http::StatusCode};
+use axum::{Json, extract::State};
 use serde_json::json;
 
-use crate::AppState;
+use crate::{AppError, AppState};
 
-type ApiResult<T> = Result<T, (StatusCode, String)>;
-
-fn internal<E: std::fmt::Display>(e: E) -> (StatusCode, String) {
-    (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
-}
-
-pub async fn debug_create_job(State(state): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
+pub async fn debug_create_job(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, AppError> {
     let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().timestamp();
     sqlx::query(
@@ -19,19 +15,19 @@ pub async fn debug_create_job(State(state): State<AppState>) -> ApiResult<Json<s
     .bind(&id)
     .bind(now)
     .execute(&state.db)
-    .await
-    .map_err(internal)?;
+    .await?;
 
     Ok(Json(json!({ "id": id })))
 }
 
-pub async fn debug_list_jobs(State(state): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
+pub async fn debug_list_jobs(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, AppError> {
     let rows: Vec<(String, String, String, i64)> = sqlx::query_as(
         "SELECT id, status, prompt_id, created_at FROM jobs ORDER BY created_at DESC LIMIT 50",
     )
     .fetch_all(&state.db)
-    .await
-    .map_err(internal)?;
+    .await?;
 
     let items: Vec<_> = rows
         .into_iter()

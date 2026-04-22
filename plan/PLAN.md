@@ -1145,15 +1145,17 @@ Build strictly in this order. Each milestone is independently testable with `cur
 
 **Done.** Two new source modules (`config.rs`, `db.rs`, `state.rs`, `handlers.rs`), one migration. `config.toml` parsing will return when we need a non-env setting.
 
-### Milestone 3 — Bearer auth middleware
+### Milestone 3 — Bearer auth middleware ✓
 
-- [ ] Add `tower` and `tower-http`
-- [ ] Write auth middleware: check `Authorization: Bearer <token>` against `config.token`
-- [ ] Apply to all routes except `/api/health`
-- [ ] Remove debug endpoints from previous milestone (or keep under auth)
-- [ ] Verify: curl without token returns 401; with token returns 200
+- [x] Add `subtle` (constant-time compare) + `thiserror`. `tower-http` deferred until we actually want request-tracing middleware.
+- [x] `Config::token` added, loaded from required `ZUN_TOKEN` env var; minimum length 16 chars
+- [x] `AppError` type (`error.rs`) with `Unauthorized` + `Internal`, `IntoResponse` emits the `{error, code}` JSON envelope, `From<sqlx::Error>` for clean `?` propagation
+- [x] `auth::require_bearer` middleware — extracts `Authorization: Bearer <token>`, constant-time compares against `state.config.token`, returns `AppError::Unauthorized` on any mismatch (missing header, no `Bearer ` prefix, length mismatch, token mismatch)
+- [x] Router split: `/api/health` stays public; debug routes are wrapped by `route_layer(middleware::from_fn_with_state(state, auth::require_bearer))` then `.with_state(state)`, then merged into the public tree
+- [x] Debug handlers migrated from `(StatusCode, String)` to `Result<_, AppError>` — `?` on sqlx errors now Just Works
+- [x] Integration tests (`tests/auth.rs`, 5 scenarios): health public / missing header / wrong token / missing `Bearer ` prefix / correct token. `tests/jobs.rs` updated to send auth header.
 
-**Done when:** auth works; no route leaks without the token.
+**Done.** 10/10 tests pass, fmt + clippy clean.
 
 ### Milestone 4 — Upload endpoint
 

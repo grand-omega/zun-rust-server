@@ -10,7 +10,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let config = Config::from_env();
+    let config = Config::from_env()?;
     tracing::info!(data_dir = %config.data_dir.display(), bind = %config.bind_addr, "starting");
 
     let pool = db::init(&config.data_dir).await?;
