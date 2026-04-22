@@ -1,0 +1,27 @@
+# Dev-time placeholder prompts. Replace with real prompts later; when you do,
+# flip the gitignore so this file is no longer tracked.
+
+prompts:
+  - id: anime_style
+    label: Anime-ify
+    description: Transform into anime style with cel shading
+    text: >-
+      transform into anime style, cel shaded, vibrant colors,
+      clean line art
+    workflow: flux2_klein_edit
+
+  - id: oil_painting
+    label: Oil painting
+    description: Classic oil painting rendering
+    text: >-
+      oil painting, visible brush strokes, rich impasto texture,
+      Rembrandt lighting
+    workflow: flux2_klein_edit
+
+  - id: remove_bg
+    label: Remove background
+    description: Isolate subject on a clean white background
+    text: >-
+      isolated subject on pure white background, clean edges,
+      studio photography
+    workflow: flux_fill_auto_mask

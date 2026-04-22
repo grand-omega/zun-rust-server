@@ -1,3 +1,4 @@
 /target
-/data
-!/data/prompts.example.yaml
+# Ignore everything under /data except the committed dev prompts.
+/data/*
+!/data/prompts.yaml

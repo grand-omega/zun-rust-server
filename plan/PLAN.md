@@ -1157,17 +1157,21 @@ Build strictly in this order. Each milestone is independently testable with `cur
 
 **Done.** 10/10 tests pass, fmt + clippy clean.
 
-### Milestone 4 — Upload endpoint
+### Milestone 4 — Upload endpoint ✓
 
-- [ ] Enable `axum` `multipart` feature
-- [ ] Add `tower-http` body limit (20 MB)
-- [ ] Implement `POST /api/jobs`: parse multipart, validate `prompt_id`, write file to `inputs/`, insert row, return `{job_id}`
-- [ ] Load prompts from `prompts.yaml` at startup
-- [ ] Add `GET /api/prompts`
-- [ ] Add `GET /api/jobs/{id}` returning status
-- [ ] Verify with curl: submit an image, fetch status (should be `queued`)
+- [x] `axum` `multipart` feature enabled; `serde_yaml` added for prompts loading
+- [x] Body limit: `DefaultBodyLimit::max(20 MiB)` scoped to the submit route (axum built-in; no `tower-http` dependency yet)
+- [x] `src/prompts.rs` — `Prompt` (internal) + `PromptDto` (public projection: id/label/description only — `text` and `workflow` never leak); `load()` dedupes on `id`
+- [x] `data/prompts.yaml` committed with 3 dev-placeholder prompts (user will replace with real prompts later; `.gitignore` allows this one file only)
+- [x] `AppState.prompts: Arc<HashMap<String, Prompt>>` loaded once at startup
+- [x] `POST /api/jobs`: parses multipart, validates content-type (`image/jpeg` | `image/png`), validates `prompt_id` against catalog, saves to `data/inputs/{uuid}.{ext}`, inserts row, returns 201 `{job_id}`
+- [x] `GET /api/prompts` — returns public projection, id-sorted
+- [x] `GET /api/jobs/{id}` — returns full status with `prompt_label` joined from catalog and `progress: null` (will populate when WebSocket lands)
+- [x] `AppError` gained `NotFound`, `BadRequest(String)`, `UnknownPrompt(String)`, plus `From<std::io::Error>` and `From<MultipartError>`
+- [x] `sqlx::FromRow` on `JobStatusRow` — keeps clippy's `type_complexity` happy and is reusable later
+- [x] Integration tests (`tests/submit.rs`, 8 scenarios): prompts shape, auth requirement, happy-path submit + status roundtrip (with file-on-disk assertion), unknown prompt, missing image, bad content-type, unauth submit, 404 on unknown job
 
-**Done when:** full submit + status flow works without ComfyUI integration (status stays queued).
+**Done.** 18/18 tests pass, fmt + clippy clean. Status stays `queued` — worker lands in M5.
 
 ### Milestone 5 — ComfyUI integration
 

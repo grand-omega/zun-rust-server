@@ -1,5 +1,6 @@
+use std::sync::Arc;
 use tracing_subscriber::{EnvFilter, fmt};
-use zun_rust_server::{AppState, Config, db, router};
+use zun_rust_server::{AppState, Config, db, prompts, router};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -14,9 +15,14 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(data_dir = %config.data_dir.display(), bind = %config.bind_addr, "starting");
 
     let pool = db::init(&config.data_dir).await?;
+    let prompts_path = config.data_dir.join("prompts.yaml");
+    let prompts = prompts::load(&prompts_path)?;
+    tracing::info!(n = prompts.len(), path = %prompts_path.display(), "prompts loaded");
+
     let state = AppState {
         db: pool,
         config: config.clone(),
+        prompts: Arc::new(prompts),
     };
 
     let listener = tokio::net::TcpListener::bind(&config.bind_addr).await?;

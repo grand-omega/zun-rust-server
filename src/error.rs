@@ -11,6 +11,15 @@ pub enum AppError {
     #[error("unauthorized")]
     Unauthorized,
 
+    #[error("not found")]
+    NotFound,
+
+    #[error("{0}")]
+    BadRequest(String),
+
+    #[error("unknown prompt id: {0}")]
+    UnknownPrompt(String),
+
     #[error("internal error")]
     Internal(#[source] anyhow::Error),
 }
@@ -19,6 +28,9 @@ impl AppError {
     fn parts(&self) -> (StatusCode, &'static str) {
         match self {
             Self::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized"),
+            Self::NotFound => (StatusCode::NOT_FOUND, "not_found"),
+            Self::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request"),
+            Self::UnknownPrompt(_) => (StatusCode::BAD_REQUEST, "invalid_prompt_id"),
             Self::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
         }
     }
@@ -38,5 +50,17 @@ impl IntoResponse for AppError {
 impl From<sqlx::Error> for AppError {
     fn from(e: sqlx::Error) -> Self {
         Self::Internal(e.into())
+    }
+}
+
+impl From<std::io::Error> for AppError {
+    fn from(e: std::io::Error) -> Self {
+        Self::Internal(e.into())
+    }
+}
+
+impl From<axum::extract::multipart::MultipartError> for AppError {
+    fn from(e: axum::extract::multipart::MultipartError) -> Self {
+        Self::BadRequest(format!("invalid multipart: {e}"))
     }
 }
