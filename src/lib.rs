@@ -36,9 +36,14 @@ pub fn router(state: AppState) -> Router {
         .route("/api/prompts", get(handlers::list_prompts))
         .route(
             "/api/jobs",
-            post(handlers::submit_job).layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
+            post(handlers::submit_job)
+                .get(handlers::list_jobs)
+                .layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
         )
-        .route("/api/jobs/{id}", get(handlers::get_job))
+        .route(
+            "/api/jobs/{id}",
+            get(handlers::get_job).delete(handlers::delete_job),
+        )
         .route("/api/debug/job", post(handlers::debug_create_job))
         .route("/api/debug/jobs", get(handlers::debug_list_jobs))
         .route_layer(middleware::from_fn_with_state(

@@ -1,8 +1,9 @@
 use axum::{
     Json,
-    extract::{Multipart, Path, State},
+    extract::{Multipart, Path, Query, State},
     http::StatusCode,
 };
+use serde::Deserialize;
 use serde_json::json;
 
 use crate::{AppError, AppState, prompts::PromptDto};
@@ -124,6 +125,117 @@ pub async fn submit_job(
     tracing::info!(%job_id, %prompt_id, "job submitted");
 
     Ok((StatusCode::CREATED, Json(json!({ "job_id": job_id }))))
+}
+
+#[derive(Deserialize, Default)]
+pub struct ListQuery {
+    pub status: Option<String>,
+    pub limit: Option<i64>,
+    pub before: Option<i64>,
+}
+
+#[derive(sqlx::FromRow)]
+struct JobSummaryRow {
+    id: String,
+    prompt_id: String,
+    created_at: i64,
+    completed_at: Option<i64>,
+}
+
+pub async fn list_jobs(
+    State(state): State<AppState>,
+    Query(q): Query<ListQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let status = q.status.as_deref().unwrap_or("done");
+    let limit = q.limit.unwrap_or(30).clamp(1, 100);
+
+    let rows: Vec<JobSummaryRow> = if let Some(before) = q.before {
+        sqlx::query_as(
+            "SELECT id, prompt_id, created_at, completed_at FROM jobs \
+             WHERE status = ? AND created_at < ? \
+             ORDER BY created_at DESC LIMIT ?",
+        )
+        .bind(status)
+        .bind(before)
+        .bind(limit)
+        .fetch_all(&state.db)
+        .await?
+    } else {
+        sqlx::query_as(
+            "SELECT id, prompt_id, created_at, completed_at FROM jobs \
+             WHERE status = ? \
+             ORDER BY created_at DESC LIMIT ?",
+        )
+        .bind(status)
+        .bind(limit)
+        .fetch_all(&state.db)
+        .await?
+    };
+
+    let items: Vec<_> = rows
+        .into_iter()
+        .map(|row| {
+            let duration_seconds = row.completed_at.map(|completed| completed - row.created_at);
+            let prompt_label = state.prompts.get(&row.prompt_id).map(|p| p.label.clone());
+            json!({
+                "id": row.id,
+                "prompt_id": row.prompt_id,
+                "prompt_label": prompt_label,
+                "created_at": row.created_at,
+                "duration_seconds": duration_seconds,
+            })
+        })
+        .collect();
+
+    Ok(Json(json!(items)))
+}
+
+#[derive(sqlx::FromRow)]
+struct JobFilesRow {
+    input_path: String,
+    output_path: Option<String>,
+    thumb_path: Option<String>,
+}
+
+pub async fn delete_job(
+    State(state): State<AppState>,
+    Path(job_id): Path<String>,
+) -> Result<StatusCode, AppError> {
+    let row: JobFilesRow =
+        sqlx::query_as("SELECT input_path, output_path, thumb_path FROM jobs WHERE id = ?")
+            .bind(&job_id)
+            .fetch_optional(&state.db)
+            .await?
+            .ok_or(AppError::NotFound)?;
+
+    let paths: Vec<String> = std::iter::once(row.input_path)
+        .chain(row.output_path)
+        .chain(row.thumb_path)
+        .collect();
+
+    for rel in paths {
+        let abs = state.config.data_dir.join(&rel);
+        match tokio::fs::remove_file(&abs).await {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                tracing::warn!(
+                    path = %abs.display(),
+                    error = %e,
+                    job_id = %job_id,
+                    "failed to remove file during job delete"
+                );
+            }
+        }
+    }
+
+    sqlx::query("DELETE FROM jobs WHERE id = ?")
+        .bind(&job_id)
+        .execute(&state.db)
+        .await?;
+
+    tracing::info!(%job_id, "job deleted");
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(sqlx::FromRow)]

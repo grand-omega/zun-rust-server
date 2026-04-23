@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use axum::Router;
+use sqlx::SqlitePool;
 use tempfile::TempDir;
 use zun_rust_server::{AppState, Config, db, prompts, router};
 
@@ -31,6 +32,9 @@ prompts:
 /// seeded prompts.yaml. Keep `_tempdir` alive for the test lifetime.
 pub struct TestApp {
     pub router: Router,
+    // Other test binaries don't need direct DB access; gallery tests do.
+    #[allow(dead_code)]
+    pub db: SqlitePool,
     pub _tempdir: TempDir,
 }
 
@@ -48,15 +52,43 @@ pub async fn test_app() -> TestApp {
         token: TEST_TOKEN.to_string(),
     };
     let state = AppState {
-        db: pool,
+        db: pool.clone(),
         config,
         prompts: Arc::new(prompts_map),
         workflows: Arc::new(std::collections::HashMap::new()),
     };
     TestApp {
         router: router(state),
+        db: pool,
         _tempdir: tempdir,
     }
+}
+
+/// Insert a jobs row directly, bypassing the submit handler. Useful for
+/// seeding list/delete tests without going through the multipart path.
+/// `created_at` is unix seconds; `completed_at` is optional.
+#[allow(dead_code)]
+pub async fn seed_job(
+    db: &SqlitePool,
+    id: &str,
+    status: &str,
+    prompt_id: &str,
+    created_at: i64,
+    completed_at: Option<i64>,
+) {
+    sqlx::query(
+        "INSERT INTO jobs (id, status, prompt_id, input_path, created_at, completed_at) \
+         VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind(id)
+    .bind(status)
+    .bind(prompt_id)
+    .bind(format!("inputs/{id}.jpg"))
+    .bind(created_at)
+    .bind(completed_at)
+    .execute(db)
+    .await
+    .expect("seed_job insert");
 }
 
 /// Build `Authorization: Bearer <token>` header value.
