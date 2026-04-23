@@ -1,6 +1,9 @@
 /target
+# Local secret-bearing config (ZUN_TOKEN, etc.) — never committed.
+.env
 # Ignore everything under /data except the committed dev prompts and the
 # workflows symlink that points at ../../project-zun/workflows.
 /data/*
 !/data/prompts.yaml
 !/data/workflows
+.claude
