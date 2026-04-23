@@ -12,24 +12,34 @@ set dotenv-load := true
 default:
     @just --list
 
-# Create .env from .env.example with a freshly-generated token. Idempotent.
+# First-time bootstrap: create .env with a fresh token, and copy the
+# prompts template if data/prompts.yaml doesn't exist. Idempotent — a
+# second `just setup` is a no-op on anything that already exists.
 setup:
     #!/usr/bin/env bash
     set -euo pipefail
+    # --- .env ---
     if [[ -f .env ]]; then
         echo ".env already exists — leaving it alone."
-        echo "  edit it directly, or rm .env && just setup to regenerate."
-        exit 0
-    fi
-    if [[ ! -f .env.example ]]; then
+    elif [[ ! -f .env.example ]]; then
         echo "error: .env.example is missing from the repo root." >&2
         exit 1
+    else
+        TOKEN=$(openssl rand -hex 32)
+        sed "s|^ZUN_TOKEN=$|ZUN_TOKEN=${TOKEN}|" .env.example > .env
+        chmod 600 .env
+        echo "wrote .env (mode 600) with a freshly generated 64-char token."
     fi
-    TOKEN=$(openssl rand -hex 32)
-    # Replace the empty ZUN_TOKEN= line with one carrying the generated token.
-    sed "s|^ZUN_TOKEN=$|ZUN_TOKEN=${TOKEN}|" .env.example > .env
-    chmod 600 .env
-    echo "wrote .env (mode 600) with a freshly generated 64-char token."
+    # --- data/prompts.yaml ---
+    if [[ -f data/prompts.yaml ]]; then
+        echo "data/prompts.yaml already exists — leaving it alone."
+    elif [[ ! -f data/prompts.example.yaml ]]; then
+        echo "error: data/prompts.example.yaml missing; cannot bootstrap prompts." >&2
+        exit 1
+    else
+        cp data/prompts.example.yaml data/prompts.yaml
+        echo "wrote data/prompts.yaml from template — edit with your real prompts."
+    fi
     echo "next: just serve-dev"
 
 # Run in development mode: debug build, pretty logs, bound to 127.0.0.1.

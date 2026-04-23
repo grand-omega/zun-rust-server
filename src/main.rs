@@ -19,8 +19,21 @@ async fn main() -> anyhow::Result<()> {
 
     let pool = db::init(&config.data_dir).await?;
 
-    let prompts = prompts::load(&config.prompts_path)?;
-    tracing::info!(n = prompts.len(), path = %config.prompts_path.display(), "prompts loaded");
+    let prompts_path = config.data_dir.join("prompts.yaml");
+    if !prompts_path.exists() {
+        let example = config.data_dir.join("prompts.example.yaml");
+        anyhow::bail!(
+            "prompts file not found: {}\n\
+             Create it from the template and edit with your prompts:\n    \
+             cp {} {}\n\
+             Or run `just setup` to bootstrap everything.",
+            prompts_path.display(),
+            example.display(),
+            prompts_path.display(),
+        );
+    }
+    let prompts = prompts::load(&prompts_path)?;
+    tracing::info!(n = prompts.len(), path = %prompts_path.display(), "prompts loaded");
 
     let workflows_dir = config.data_dir.join("workflows");
     let workflows = workflow::load_templates(&workflows_dir)?;
