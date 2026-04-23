@@ -13,10 +13,12 @@ pub struct Config {
     pub data_dir: PathBuf,
     #[serde(default)]
     pub log_format: LogFormat,
+    pub tls_cert: Option<PathBuf>,
+    pub tls_key: Option<PathBuf>,
 }
 
 fn default_bind() -> String {
-    "127.0.0.1:8080".into()
+    "0.0.0.0:8080".into()
 }
 fn default_comfy_url() -> String {
     "http://127.0.0.1:8188".into()

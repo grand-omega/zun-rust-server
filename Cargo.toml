@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.102"
+axum-server = { version = "0.7", features = ["tls-rustls"] }
 axum = { version = "0.8.9", features = ["multipart"] }
 chrono = { version = "0.4.44", features = ["serde"] }
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
