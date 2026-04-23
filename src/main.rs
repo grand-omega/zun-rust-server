@@ -1,8 +1,9 @@
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
 use zun_rust_server::{
-    AppState, Config, comfy::ComfyClient, comfy_monitor, db, logging, prompts, router, worker,
-    workflow,
+    AppState, Config, auth::AuthLimiter, comfy::ComfyClient, comfy_monitor, db, logging, prompts,
+    router, worker, workflow,
 };
 
 #[tokio::main]
@@ -59,6 +60,7 @@ async fn main() -> anyhow::Result<()> {
         comfy: comfy.clone(),
         comfy_health: comfy_health.clone(),
         worker_tx,
+        auth_limiter: AuthLimiter::new(),
     };
 
     // Broadcast-once shutdown channel. Axum, the worker, and the comfy
@@ -80,17 +82,22 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(addr = %config.bind_addr, "zun-rust-server listening");
 
     let mut axum_shutdown_rx = shutdown_rx;
-    axum::serve(listener, router(state))
-        .with_graceful_shutdown(async move {
-            // Wait until the watched value flips.
-            while !*axum_shutdown_rx.borrow() {
-                if axum_shutdown_rx.changed().await.is_err() {
-                    return;
-                }
+    // Use `into_make_service_with_connect_info` so the auth middleware can
+    // extract the peer IP for the per-IP failure rate limiter.
+    axum::serve(
+        listener,
+        router(state).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move {
+        // Wait until the watched value flips.
+        while !*axum_shutdown_rx.borrow() {
+            if axum_shutdown_rx.changed().await.is_err() {
+                return;
             }
-            tracing::info!("server no longer accepting new connections; draining");
-        })
-        .await?;
+        }
+        tracing::info!("server no longer accepting new connections; draining");
+    })
+    .await?;
 
     tracing::info!("zun-rust-server exited cleanly");
     Ok(())

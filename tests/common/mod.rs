@@ -5,7 +5,8 @@ use sqlx::SqlitePool;
 use tempfile::TempDir;
 use tokio::sync::{mpsc, watch};
 use zun_rust_server::{
-    AppState, Config, comfy::ComfyClient, comfy_monitor, db, prompts, router, worker,
+    AppState, Config, auth::AuthLimiter, comfy::ComfyClient, comfy_monitor, db, prompts, router,
+    worker,
 };
 
 /// Bearer token used by all tests.
@@ -75,6 +76,7 @@ pub async fn test_app_with_comfy(comfy_url: &str) -> TestApp {
         comfy,
         comfy_health: comfy_monitor::new_handle(),
         worker_tx,
+        auth_limiter: AuthLimiter::new(),
     };
     TestApp {
         router: router(state.clone()),

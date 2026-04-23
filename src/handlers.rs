@@ -223,20 +223,31 @@ pub async fn delete_job(
         .chain(row.thumb_path)
         .collect();
 
-    for rel in paths {
-        let abs = state.config.data_dir.join(&rel);
+    // Remove files first. Treat NotFound as success (may already be gone).
+    // If any other error occurs, keep the DB row so the client can retry
+    // DELETE; dropping the row here would leak files with no way to find
+    // them again short of a filesystem sweep.
+    let mut hard_failures = 0usize;
+    for rel in &paths {
+        let abs = state.config.data_dir.join(rel);
         match tokio::fs::remove_file(&abs).await {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => {
+                hard_failures += 1;
                 tracing::warn!(
                     path = %abs.display(),
                     error = %e,
                     job_id = %job_id,
-                    "failed to remove file during job delete"
+                    "failed to remove file during job delete",
                 );
             }
         }
+    }
+    if hard_failures > 0 {
+        return Err(AppError::Internal(anyhow::anyhow!(
+            "failed to remove {hard_failures} file(s) for job {job_id}; row preserved for retry"
+        )));
     }
 
     sqlx::query("DELETE FROM jobs WHERE id = ?")

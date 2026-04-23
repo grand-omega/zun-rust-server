@@ -259,16 +259,34 @@ async fn process_job(state: &AppState, job: &QueuedJob) -> anyhow::Result<()> {
     // Cheap dimension read via image's ImageReader::into_dimensions;
     // non-fatal if the file isn't a decodable image (shouldn't happen
     // since ComfyUI produces PNGs, but we don't want this to fail the job).
+    // Log at warn instead of silently swallowing so a pipeline regression
+    // producing non-decodable outputs is visible.
     let abs_output_for_read = abs_output.clone();
-    let (width, height) = tokio::task::spawn_blocking(move || {
-        image::ImageReader::open(&abs_output_for_read)
-            .ok()
-            .and_then(|r| r.into_dimensions().ok())
+    let dim_result = tokio::task::spawn_blocking(move || -> anyhow::Result<(u32, u32)> {
+        let reader = image::ImageReader::open(&abs_output_for_read)?;
+        Ok(reader.into_dimensions()?)
     })
-    .await
-    .unwrap_or(None)
-    .map(|(w, h)| (Some(w as i64), Some(h as i64)))
-    .unwrap_or((None, None));
+    .await;
+    let (width, height) = match dim_result {
+        Ok(Ok((w, h))) => (Some(w as i64), Some(h as i64)),
+        Ok(Err(e)) => {
+            tracing::warn!(
+                job_id = %job.id,
+                output = %rel_output,
+                error = %e,
+                "failed to read output dimensions; storing as null",
+            );
+            (None, None)
+        }
+        Err(e) => {
+            tracing::warn!(
+                job_id = %job.id,
+                error = %e,
+                "dimension-read task join failed; storing as null",
+            );
+            (None, None)
+        }
+    };
 
     mark_done(&state.db, &job.id, &rel_output, width, height).await?;
     tracing::info!(
