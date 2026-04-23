@@ -122,6 +122,10 @@ pub async fn submit_job(
     .execute(&state.db)
     .await?;
 
+    // Wake the worker; a full channel just means it already has a pending
+    // wake — either way it will notice this job on its next drain.
+    let _ = state.worker_tx.try_send(());
+
     tracing::info!(%job_id, %prompt_id, "job submitted");
 
     Ok((StatusCode::CREATED, Json(json!({ "job_id": job_id }))))

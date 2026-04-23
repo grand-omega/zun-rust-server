@@ -1173,19 +1173,20 @@ Build strictly in this order. Each milestone is independently testable with `cur
 
 **Done.** 18/18 tests pass, fmt + clippy clean. Status stays `queued` — worker lands in M5.
 
-### Milestone 5 — ComfyUI integration
+### Milestone 5 — ComfyUI integration ✓
 
-- [ ] Export your working FLUX2 workflow as API JSON, commit to `workflows/`
-- [ ] Write `comfy::client` with `submit_prompt` and `poll_history` functions
-- [ ] Write `comfy::workflow::build_workflow` with node-ID substitution
-- [ ] Implement the worker loop in `worker.rs`
-- [ ] Spawn worker in `main.rs` after server setup
-- [ ] On job submission, send `()` on wake channel
-- [ ] Download ComfyUI outputs to `/srv/zun/outputs/`
-- [ ] Update DB with output_path, status=done, timestamps
-- [ ] Verify end-to-end: submit image, poll status, fetch result
+Landed in four commits: request tracing, workflow loader, ComfyUI client, worker loop.
 
-**Done when:** `curl -F image=@photo.jpg -F prompt_id=anime_style http://localhost:8080/api/jobs` returns a job_id, and after ~30s the status becomes `done` with a real image at `/api/jobs/{id}/result`.
+- [x] **Step 1: request tracing layer.** `tower-http` trace + request-id + sensitive-headers (Authorization redacted). Every handler call now nests under a `request` span with `id`/`method`/`uri`.
+- [x] **Step 2: workflow template loader + placeholder substitution.** `src/workflow.rs` with `patch_placeholders` (whole-string match, no substring), `build_edit_workflow`, `load_templates`. Symlink `data/workflows` → `../../project-zun/workflows` committed. Matches project-zun's `doc/WORKFLOWS.md` contract exactly.
+- [x] **Step 3: ComfyUI client.** `src/comfy.rs` with `upload_image` (multipart POST), `submit_prompt`, `get_history`, `view`. Strongly-typed `HistoryEntry` exposes `succeeded()` and `primary_output(prefix)` which filters `mask_preview_*` side outputs per project-zun's §2. reqwest 0.13 with rustls/json/multipart/query features (no defaults). 8 wiremock tests.
+- [x] **Step 4: worker loop.** `src/worker.rs`: drain oldest-queued → `mark_running` → upload → build workflow → submit → poll history (300s per-job timeout) → download primary output → write to `data/outputs/` → `mark_done`. Crash recovery: `running` → `queued` on startup. Wake channel (`mpsc::Sender<()>` in AppState) `try_send`-ed by the submit handler. 3 end-to-end wiremock tests covering happy path, comfy execution error, and orphaned-running reset.
+
+`AppState` gained `comfy: ComfyClient` and `worker_tx: Sender<()>`. `Config` gained `comfy_url` (env `ZUN_COMFY_URL`, default `http://127.0.0.1:8188`). Main spawns the worker before binding the listener.
+
+**Done.** 53/53 tests pass. End-to-end roundtrip against fake ComfyUI (wiremock): submit → queued → running → done, with output bytes written to `data/outputs/zun_{job_id}_*.png`.
+
+**Deferred from plan:** Output dimensions (width/height) — still nullable. Need `image` crate decode, which comes naturally with thumbnail work in M6b.
 
 ### Milestone 6 — Gallery endpoints
 

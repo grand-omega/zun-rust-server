@@ -5,6 +5,7 @@ pub struct Config {
     pub data_dir: PathBuf,
     pub bind_addr: String,
     pub token: String,
+    pub comfy_url: String,
 }
 
 impl Config {
@@ -21,10 +22,13 @@ impl Config {
         if token.len() < 16 {
             anyhow::bail!("ZUN_TOKEN must be at least 16 characters");
         }
+        let comfy_url =
+            std::env::var("ZUN_COMFY_URL").unwrap_or_else(|_| "http://127.0.0.1:8188".to_string());
         Ok(Self {
             data_dir,
             bind_addr,
             token,
+            comfy_url,
         })
     }
 }

@@ -3,7 +3,8 @@ use std::sync::Arc;
 use axum::Router;
 use sqlx::SqlitePool;
 use tempfile::TempDir;
-use zun_rust_server::{AppState, Config, db, prompts, router};
+use tokio::sync::mpsc;
+use zun_rust_server::{AppState, Config, comfy::ComfyClient, db, prompts, router, worker};
 
 /// Bearer token used by all tests.
 pub const TEST_TOKEN: &str = "test-token-0123456789abcdef";
@@ -32,13 +33,22 @@ prompts:
 /// seeded prompts.yaml. Keep `_tempdir` alive for the test lifetime.
 pub struct TestApp {
     pub router: Router,
-    // Other test binaries don't need direct DB access; gallery tests do.
+    // Other test binaries don't need direct DB access; gallery/worker tests do.
     #[allow(dead_code)]
     pub db: SqlitePool,
+    #[allow(dead_code)]
+    pub state: AppState,
+    /// The receiver half of the wake channel — take this and pass to
+    /// `worker::spawn` in tests that need the worker running. Tests that
+    /// don't need a worker can ignore it (submitted jobs just stay queued).
+    #[allow(dead_code)]
+    pub worker_rx: Option<mpsc::Receiver<()>>,
     pub _tempdir: TempDir,
 }
 
-pub async fn test_app() -> TestApp {
+/// Build a TestApp with `comfy_url` pointing at a wiremock server (or any
+/// URL — if no worker is spawned, it's never called).
+pub async fn test_app_with_comfy(comfy_url: &str) -> TestApp {
     let tempdir = tempfile::tempdir().expect("create tempdir");
     let pool = db::init(tempdir.path()).await.expect("init db");
 
@@ -50,23 +60,60 @@ pub async fn test_app() -> TestApp {
         data_dir: tempdir.path().to_path_buf(),
         bind_addr: "127.0.0.1:0".to_string(),
         token: TEST_TOKEN.to_string(),
+        comfy_url: comfy_url.to_string(),
     };
+    let comfy = ComfyClient::new(comfy_url).expect("comfy client");
+    let (worker_tx, worker_rx) = mpsc::channel::<()>(1);
+
     let state = AppState {
         db: pool.clone(),
         config,
         prompts: Arc::new(prompts_map),
         workflows: Arc::new(std::collections::HashMap::new()),
+        comfy,
+        worker_tx,
     };
     TestApp {
-        router: router(state),
+        router: router(state.clone()),
         db: pool,
+        state,
+        worker_rx: Some(worker_rx),
         _tempdir: tempdir,
     }
 }
 
+/// Convenience: TestApp with an unreachable comfy URL. Use when the test
+/// doesn't spawn a worker, so the URL never gets dialled.
+#[allow(dead_code)]
+pub async fn test_app() -> TestApp {
+    test_app_with_comfy("http://127.0.0.1:1").await
+}
+
+/// Spawn the worker consuming the TestApp's wake channel. Call once per
+/// TestApp; subsequent calls panic because the rx is already taken.
+#[allow(dead_code)]
+pub fn spawn_worker(app: &mut TestApp) -> tokio::task::JoinHandle<()> {
+    let rx = app
+        .worker_rx
+        .take()
+        .expect("worker already spawned for this TestApp");
+    worker::spawn(app.state.clone(), rx)
+}
+
+/// Seed a workflow template into AppState (tests bypass the filesystem
+/// loader). Takes &mut AppState so we can rebuild the Arc<HashMap>.
+#[allow(dead_code)]
+pub fn seed_workflow(app: &mut TestApp, stem: &str, template: serde_json::Value) {
+    let mut map = (*app.state.workflows).clone();
+    map.insert(stem.to_string(), template);
+    let arc = Arc::new(map);
+    app.state.workflows = arc.clone();
+    // Rebuild the router so its State<AppState> sees the updated workflows.
+    app.router = router(app.state.clone());
+}
+
 /// Insert a jobs row directly, bypassing the submit handler. Useful for
 /// seeding list/delete tests without going through the multipart path.
-/// `created_at` is unix seconds; `completed_at` is optional.
 #[allow(dead_code)]
 pub async fn seed_job(
     db: &SqlitePool,
@@ -98,7 +145,6 @@ pub fn bearer(token: &str) -> String {
 }
 
 /// Build a multipart/form-data body for submitting a job.
-/// Returns (content_type_header_value, body_bytes).
 #[allow(dead_code)]
 pub fn multipart_image_job(
     image_bytes: &[u8],
@@ -107,8 +153,6 @@ pub fn multipart_image_job(
 ) -> (String, Vec<u8>) {
     let boundary = "----ZunTestBoundary9XyZ";
     let mut body: Vec<u8> = Vec::new();
-
-    // image field
     body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
     body.extend_from_slice(
         b"Content-Disposition: form-data; name=\"image\"; filename=\"t.bin\"\r\n",
@@ -116,15 +160,11 @@ pub fn multipart_image_job(
     body.extend_from_slice(format!("Content-Type: {content_type}\r\n\r\n").as_bytes());
     body.extend_from_slice(image_bytes);
     body.extend_from_slice(b"\r\n");
-
-    // prompt_id field
     body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
     body.extend_from_slice(b"Content-Disposition: form-data; name=\"prompt_id\"\r\n\r\n");
     body.extend_from_slice(prompt_id.as_bytes());
     body.extend_from_slice(b"\r\n");
-
     body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
-
     (format!("multipart/form-data; boundary={boundary}"), body)
 }
 
