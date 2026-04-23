@@ -98,6 +98,17 @@ impl ComfyClient {
         }
     }
 
+    /// Lightweight liveness probe. Succeeds if ComfyUI answers `/system_stats`
+    /// with a 2xx. Used by the background health monitor.
+    pub async fn health(&self) -> anyhow::Result<()> {
+        self.http
+            .get(format!("{}/system_stats", self.base))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
     /// Download a produced output (image, mask, etc). Bytes are whatever
     /// content-type ComfyUI serves — typically `image/png` for FLUX outputs.
     pub async fn view(

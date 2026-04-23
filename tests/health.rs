@@ -30,6 +30,30 @@ async fn health_returns_ok_and_version() {
 }
 
 #[tokio::test]
+async fn health_reports_comfy_reachability_shape() {
+    let app = common::test_app().await;
+    let resp = app
+        .router
+        .oneshot(
+            Request::builder()
+                .uri("/api/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+    // Fresh test app: monitor never ran, so comfy is reported "not yet ok"
+    // (no successful probe yet, no failures yet).
+    assert_eq!(body["comfy"]["ok"], false);
+    assert!(body["comfy"]["last_ok_at"].is_null());
+    assert_eq!(body["comfy"]["consecutive_failures"], 0);
+}
+
+#[tokio::test]
 async fn response_carries_x_request_id() {
     let app = common::test_app().await;
     let resp = app

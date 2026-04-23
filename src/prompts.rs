@@ -2,6 +2,14 @@ use std::{collections::HashMap, path::Path};
 
 use serde::{Deserialize, Serialize};
 
+/// Default per-prompt timeout. Suits FLUX2 klein (typical ~7s). Bump
+/// per-prompt in prompts.yaml for slower workflows (e.g. FLUX.1 Fill).
+pub const DEFAULT_TIMEOUT_SECONDS: u64 = 60;
+
+fn default_timeout_seconds() -> u64 {
+    DEFAULT_TIMEOUT_SECONDS
+}
+
 /// One catalog entry. `text` and `workflow` are internal; never returned to
 /// clients. The public-facing view is `PromptDto` below.
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -12,6 +20,10 @@ pub struct Prompt {
     pub description: Option<String>,
     pub text: String,
     pub workflow: String,
+    /// Overall per-job timeout (seconds) for the ComfyUI poll loop.
+    /// Defaults to DEFAULT_TIMEOUT_SECONDS if omitted.
+    #[serde(default = "default_timeout_seconds")]
+    pub timeout_seconds: u64,
 }
 
 /// Client-facing projection: only the fields the Android app needs.

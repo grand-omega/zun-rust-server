@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod comfy;
+pub mod comfy_monitor;
 pub mod config;
 pub mod db;
 pub mod error;
@@ -17,7 +18,7 @@ pub use state::AppState;
 
 use axum::{
     Json, Router,
-    extract::DefaultBodyLimit,
+    extract::{DefaultBodyLimit, State},
     http::{Request, header},
     middleware,
     routing::{get, post},
@@ -57,20 +58,13 @@ pub fn router(state: AppState) -> Router {
             state.clone(),
             auth::require_bearer,
         ))
-        .with_state(state);
+        .with_state(state.clone());
 
     let app = Router::new()
         .route("/api/health", get(health))
+        .with_state(state)
         .merge(authed);
 
-    // Middleware stack applied to every route:
-    // 1. Mark `Authorization` sensitive so header-debug redacts it
-    //    (defense-in-depth — default TraceLayer doesn't log headers,
-    //    but custom loggers added later will respect the mark).
-    // 2. Generate an `x-request-id` if the client didn't send one.
-    // 3. Open a `request` span per request with method/uri/id — every
-    //    `tracing::*` call inside a handler inherits these fields.
-    // 4. Copy the id onto the response so clients can correlate.
     app.layer(
         ServiceBuilder::new()
             .layer(SetSensitiveRequestHeadersLayer::new(std::iter::once(
@@ -96,6 +90,18 @@ pub fn router(state: AppState) -> Router {
     )
 }
 
-async fn health() -> Json<serde_json::Value> {
-    Json(json!({ "status": "ok", "version": VERSION }))
+/// Liveness + ComfyUI reachability. Unauthenticated — Android uses this
+/// to show a connection banner. Doesn't include detailed error strings
+/// to avoid leaking internal info from an anonymous endpoint.
+async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let h = state.comfy_health.read().await;
+    Json(json!({
+        "status": "ok",
+        "version": VERSION,
+        "comfy": {
+            "ok": h.is_healthy(),
+            "last_ok_at": h.last_ok_at,
+            "consecutive_failures": h.consecutive_failures,
+        }
+    }))
 }

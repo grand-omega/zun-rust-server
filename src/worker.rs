@@ -13,34 +13,49 @@
 use std::time::Duration;
 
 use sqlx::SqlitePool;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use crate::{AppState, comfy::ComfyClient, comfy::HistoryEntry, workflow};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(1000);
-const DEFAULT_JOB_TIMEOUT: Duration = Duration::from_secs(300);
 const IDLE_TICK: Duration = Duration::from_secs(30);
 
 /// Spawn the worker on the current tokio runtime. Returns the JoinHandle
 /// mostly for completeness — in production we let it run forever.
-pub fn spawn(state: AppState, wake: mpsc::Receiver<()>) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(run(state, wake))
+pub fn spawn(
+    state: AppState,
+    wake: mpsc::Receiver<()>,
+    shutdown: watch::Receiver<bool>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(run(state, wake, shutdown))
 }
 
-async fn run(state: AppState, mut wake: mpsc::Receiver<()>) {
+async fn run(state: AppState, mut wake: mpsc::Receiver<()>, mut shutdown: watch::Receiver<bool>) {
     if let Err(e) = reset_running_jobs(&state.db).await {
         tracing::error!(error = %e, "could not reset running jobs on startup");
     }
 
     loop {
+        if *shutdown.borrow() {
+            tracing::info!("worker shutting down (queue drain complete)");
+            return;
+        }
+
         // Drain the queue as long as there are jobs to process.
         loop {
+            if *shutdown.borrow() {
+                tracing::info!("worker shutting down (mid-drain)");
+                return;
+            }
             match fetch_oldest_queued(&state.db).await {
                 Ok(Some(job)) => {
                     let job_id = job.id.clone();
                     let prompt_id = job.prompt_id.clone();
+                    // Note: if shutdown fires while process_job is running,
+                    // we let that job finish. Shutdown is checked on the
+                    // next iteration. This is intentional — interrupting
+                    // ComfyUI mid-execution leaves orphaned GPU state.
                     if let Err(e) = process_job(&state, &job).await {
-                        // Debug formatter prints the full anyhow cause chain.
                         tracing::error!(
                             target: "audit",
                             event = "job.failed",
@@ -65,10 +80,16 @@ async fn run(state: AppState, mut wake: mpsc::Receiver<()>) {
             }
         }
 
-        // Wait for a new submission or a periodic tick.
+        // Wait for a new submission, idle tick, or shutdown.
         tokio::select! {
             _ = wake.recv() => {},
             _ = tokio::time::sleep(IDLE_TICK) => {},
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() {
+                    tracing::info!("worker shutting down (idle)");
+                    return;
+                }
+            }
         }
     }
 }
@@ -199,13 +220,11 @@ async fn process_job(state: &AppState, job: &QueuedJob) -> anyhow::Result<()> {
     update_comfy_prompt_id(&state.db, &job.id, &comfy_prompt_id).await?;
     tracing::info!(job_id = %job.id, comfy_prompt_id = %comfy_prompt_id, "submitted to comfyui");
 
-    // Poll /history, bounded by the overall job timeout.
-    let entry = tokio::time::timeout(
-        DEFAULT_JOB_TIMEOUT,
-        poll_until_history(&state.comfy, &comfy_prompt_id),
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("comfyui timeout after {:?}", DEFAULT_JOB_TIMEOUT))??;
+    // Poll /history, bounded by the per-prompt job timeout.
+    let timeout = Duration::from_secs(prompt.timeout_seconds);
+    let entry = tokio::time::timeout(timeout, poll_until_history(&state.comfy, &comfy_prompt_id))
+        .await
+        .map_err(|_| anyhow::anyhow!("comfyui timeout after {}s", prompt.timeout_seconds))??;
 
     if !entry.succeeded() {
         let status_str = entry.status.status_str.as_deref().unwrap_or("unknown");

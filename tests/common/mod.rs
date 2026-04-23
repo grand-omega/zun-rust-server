@@ -3,8 +3,10 @@ use std::sync::Arc;
 use axum::Router;
 use sqlx::SqlitePool;
 use tempfile::TempDir;
-use tokio::sync::mpsc;
-use zun_rust_server::{AppState, Config, comfy::ComfyClient, db, prompts, router, worker};
+use tokio::sync::{mpsc, watch};
+use zun_rust_server::{
+    AppState, Config, comfy::ComfyClient, comfy_monitor, db, prompts, router, worker,
+};
 
 /// Bearer token used by all tests.
 pub const TEST_TOKEN: &str = "test-token-0123456789abcdef";
@@ -71,6 +73,7 @@ pub async fn test_app_with_comfy(comfy_url: &str) -> TestApp {
         prompts: Arc::new(prompts_map),
         workflows: Arc::new(std::collections::HashMap::new()),
         comfy,
+        comfy_health: comfy_monitor::new_handle(),
         worker_tx,
     };
     TestApp {
@@ -91,13 +94,19 @@ pub async fn test_app() -> TestApp {
 
 /// Spawn the worker consuming the TestApp's wake channel. Call once per
 /// TestApp; subsequent calls panic because the rx is already taken.
+/// The shutdown receiver is held only by the worker; dropping the sender
+/// side in this helper means the worker runs for the test lifetime.
 #[allow(dead_code)]
 pub fn spawn_worker(app: &mut TestApp) -> tokio::task::JoinHandle<()> {
     let rx = app
         .worker_rx
         .take()
         .expect("worker already spawned for this TestApp");
-    worker::spawn(app.state.clone(), rx)
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+    // _shutdown_tx dropped here — receiver still sees `false` for the
+    // lifetime of the test. The #[tokio::test] runtime drops the worker
+    // task when the test returns.
+    worker::spawn(app.state.clone(), rx, shutdown_rx)
 }
 
 /// Seed a workflow template into AppState (tests bypass the filesystem
