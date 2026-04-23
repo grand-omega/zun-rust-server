@@ -5,6 +5,7 @@ pub mod db;
 pub mod error;
 mod handlers;
 mod images;
+pub mod logging;
 pub mod prompts;
 pub mod state;
 pub mod worker;

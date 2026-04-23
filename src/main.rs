@@ -1,18 +1,12 @@
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tracing_subscriber::{EnvFilter, fmt};
 use zun_rust_server::{
-    AppState, Config, comfy::ComfyClient, db, prompts, router, worker, workflow,
+    AppState, Config, comfy::ComfyClient, db, logging, prompts, router, worker, workflow,
 };
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("zun_rust_server=info,tower_http=info")),
-        )
-        .init();
+    logging::init()?;
 
     let config = Config::from_env()?;
     tracing::info!(

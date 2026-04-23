@@ -44,7 +44,9 @@ impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status, code) = self.parts();
         if status.is_server_error() {
-            tracing::error!(error = ?self, "request failed");
+            // Debug on anyhow::Error prints the full cause chain — the top
+            // message alone is rarely enough to debug a 500.
+            tracing::error!(error = ?self, code, "request failed");
         }
         let body = Json(json!({ "error": self.to_string(), "code": code }));
         (status, body).into_response()

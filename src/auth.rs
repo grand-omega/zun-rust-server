@@ -20,14 +20,33 @@ pub async fn require_bearer(
     req: Request,
     next: Next,
 ) -> Result<Response, AppError> {
-    let presented = req
+    let path = req.uri().path().to_string();
+
+    let presented = match req
         .headers()
         .get(AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.strip_prefix("Bearer "))
-        .ok_or(AppError::Unauthorized)?;
+    {
+        Some(t) => t,
+        None => {
+            tracing::warn!(
+                target: "audit",
+                event = "auth.denied",
+                reason = "missing_or_malformed_header",
+                %path,
+            );
+            return Err(AppError::Unauthorized);
+        }
+    };
 
     if !token_eq(presented, &state.config.token) {
+        tracing::warn!(
+            target: "audit",
+            event = "auth.denied",
+            reason = "token_mismatch",
+            %path,
+        );
         return Err(AppError::Unauthorized);
     }
 

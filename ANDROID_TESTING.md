@@ -92,6 +92,43 @@ Every response includes an `x-request-id` header (UUID, server-generated if you 
 
 Confirmed: the server never logs the bearer token. We use tower-http's `SetSensitiveRequestHeadersLayer` to mark Authorization sensitive, and the TraceLayer doesn't log header values anyway.
 
+### Reading server logs
+
+Server logs emit in two formats:
+
+- **Pretty** (default when stderr is a TTY) — human-readable, colored.
+- **JSON** (default when stderr is not a TTY, e.g. systemd / piped output) — one JSON object per line.
+
+Force with `ZUN_LOG_FORMAT=pretty` or `ZUN_LOG_FORMAT=json`.
+
+Every request runs inside a `request` span whose fields appear on every event during that request. A typical audit event looks like:
+
+```json
+{
+  "level": "INFO",
+  "target": "audit",
+  "fields": {"event": "job.submitted", "job_id": "...", "prompt_id": "anime_style", "input_bytes": 482139},
+  "span": {"id": "14f971bd-...", "method": "POST", "uri": "/api/jobs", "name": "request"}
+}
+```
+
+Audit events you'll see per job: `job.submitted` → `job.running` → (`job.done` | `job.failed`) → `job.deleted`. Plus `auth.denied` on rejected requests (with `reason` + `path`).
+
+Grep recipes when the app misbehaves:
+```bash
+# Everything for one request id:
+journalctl -u zun-server | grep 14f971bd-
+
+# All audit events in last hour:
+ZUN_LOG_FORMAT=json cargo run | jq 'select(.target == "audit")'
+
+# Job lifecycle for one job_id:
+ZUN_LOG_FORMAT=json cargo run | jq 'select(.fields.job_id == "<uuid>")'
+
+# 500s only:
+ZUN_LOG_FORMAT=json cargo run | jq 'select(.level == "ERROR")'
+```
+
 ## Smoke-test transcript
 
 The server comes up with three dev-placeholder prompts baked in. Use any of:

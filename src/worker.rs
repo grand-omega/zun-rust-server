@@ -38,11 +38,21 @@ async fn run(state: AppState, mut wake: mpsc::Receiver<()>) {
             match fetch_oldest_queued(&state.db).await {
                 Ok(Some(job)) => {
                     let job_id = job.id.clone();
+                    let prompt_id = job.prompt_id.clone();
                     if let Err(e) = process_job(&state, &job).await {
-                        tracing::error!(job_id = %job_id, error = %e, "job failed");
-                        if let Err(mark_err) = mark_failed(&state.db, &job_id, &e.to_string()).await
+                        // Debug formatter prints the full anyhow cause chain.
+                        tracing::error!(
+                            target: "audit",
+                            event = "job.failed",
+                            job_id = %job_id,
+                            %prompt_id,
+                            error = ?e,
+                            "job failed",
+                        );
+                        if let Err(mark_err) =
+                            mark_failed(&state.db, &job_id, &format!("{e:#}")).await
                         {
-                            tracing::error!(job_id = %job_id, error = %mark_err, "could not mark job failed");
+                            tracing::error!(job_id = %job_id, error = ?mark_err, "could not mark job failed");
                         }
                     }
                 }
@@ -150,8 +160,14 @@ async fn mark_failed(db: &SqlitePool, job_id: &str, error_message: &str) -> anyh
 }
 
 async fn process_job(state: &AppState, job: &QueuedJob) -> anyhow::Result<()> {
+    let started_at = std::time::Instant::now();
     mark_running(&state.db, &job.id).await?;
-    tracing::info!(job_id = %job.id, prompt_id = %job.prompt_id, "job running");
+    tracing::info!(
+        target: "audit",
+        event = "job.running",
+        job_id = %job.id,
+        prompt_id = %job.prompt_id,
+    );
 
     // Resolve prompt + workflow template.
     let prompt = state
@@ -237,10 +253,15 @@ async fn process_job(state: &AppState, job: &QueuedJob) -> anyhow::Result<()> {
 
     mark_done(&state.db, &job.id, &rel_output, width, height).await?;
     tracing::info!(
+        target: "audit",
+        event = "job.done",
         job_id = %job.id,
+        prompt_id = %job.prompt_id,
         output = %rel_output,
-        bytes = bytes.len(),
-        "job done"
+        output_bytes = bytes.len(),
+        width = ?width,
+        height = ?height,
+        duration_ms = started_at.elapsed().as_millis() as u64,
     );
     Ok(())
 }

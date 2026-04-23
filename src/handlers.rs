@@ -126,7 +126,13 @@ pub async fn submit_job(
     // wake — either way it will notice this job on its next drain.
     let _ = state.worker_tx.try_send(());
 
-    tracing::info!(%job_id, %prompt_id, "job submitted");
+    tracing::info!(
+        target: "audit",
+        event = "job.submitted",
+        %job_id,
+        %prompt_id,
+        input_bytes = image_bytes.len(),
+    );
 
     Ok((StatusCode::CREATED, Json(json!({ "job_id": job_id }))))
 }
@@ -238,7 +244,7 @@ pub async fn delete_job(
         .execute(&state.db)
         .await?;
 
-    tracing::info!(%job_id, "job deleted");
+    tracing::info!(target: "audit", event = "job.deleted", %job_id);
     Ok(StatusCode::NO_CONTENT)
 }
 
