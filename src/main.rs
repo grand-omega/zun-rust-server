@@ -1,4 +1,3 @@
-use axum_server::tls_rustls::RustlsConfig;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
@@ -78,43 +77,25 @@ async fn main() -> anyhow::Result<()> {
         let _ = shutdown_tx.send(true);
     });
 
-    let addr: SocketAddr = config.bind.parse()?;
-    let svc = router(state).into_make_service_with_connect_info::<SocketAddr>();
+    let listener = tokio::net::TcpListener::bind(&config.bind).await?;
+    tracing::info!(addr = %config.bind, "zun-rust-server listening");
 
-    // Bridge the watch-channel shutdown signal to axum-server's Handle.
-    let server_handle = axum_server::Handle::new();
-    {
-        let handle = server_handle.clone();
-        let mut rx = shutdown_rx;
-        tokio::spawn(async move {
-            while !*rx.borrow() {
-                if rx.changed().await.is_err() {
-                    break;
-                }
+    let mut axum_shutdown_rx = shutdown_rx;
+    // Use `into_make_service_with_connect_info` so the auth middleware can
+    // extract the peer IP for the per-IP failure rate limiter.
+    axum::serve(
+        listener,
+        router(state).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move {
+        while !*axum_shutdown_rx.borrow() {
+            if axum_shutdown_rx.changed().await.is_err() {
+                return;
             }
-            tracing::info!("server no longer accepting new connections; draining");
-            handle.graceful_shutdown(Some(std::time::Duration::from_secs(30)));
-        });
-    }
-
-    match (&config.tls_cert, &config.tls_key) {
-        (Some(cert), Some(key)) => {
-            let tls = RustlsConfig::from_pem_file(cert, key).await?;
-            tracing::info!(%addr, "listening (HTTPS)");
-            axum_server::bind_rustls(addr, tls)
-                .handle(server_handle)
-                .serve(svc)
-                .await?;
         }
-        (None, None) => {
-            tracing::info!(%addr, "listening (HTTP)");
-            axum_server::bind(addr)
-                .handle(server_handle)
-                .serve(svc)
-                .await?;
-        }
-        _ => anyhow::bail!("config: set both tls_cert and tls_key, or neither"),
-    }
+        tracing::info!("server no longer accepting new connections; draining");
+    })
+    .await?;
 
     tracing::info!("zun-rust-server exited cleanly");
     Ok(())

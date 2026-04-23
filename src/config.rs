@@ -13,8 +13,6 @@ pub struct Config {
     pub data_dir: PathBuf,
     #[serde(default)]
     pub log_format: LogFormat,
-    pub tls_cert: Option<PathBuf>,
-    pub tls_key: Option<PathBuf>,
 }
 
 fn default_bind() -> String {
