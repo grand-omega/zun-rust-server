@@ -1,34 +1,54 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone)]
+use serde::Deserialize;
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct Config {
-    pub data_dir: PathBuf,
-    pub bind_addr: String,
     pub token: String,
+    #[serde(default = "default_bind")]
+    pub bind: String,
+    #[serde(default = "default_comfy_url")]
     pub comfy_url: String,
+    #[serde(default = "default_data_dir")]
+    pub data_dir: PathBuf,
+    #[serde(default)]
+    pub log_format: LogFormat,
+}
+
+fn default_bind() -> String {
+    "127.0.0.1:8080".into()
+}
+fn default_comfy_url() -> String {
+    "http://127.0.0.1:8188".into()
+}
+fn default_data_dir() -> PathBuf {
+    PathBuf::from("./data")
+}
+
+/// Log output format. Defaults to `auto` (pretty when stderr is a TTY, JSON otherwise).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum LogFormat {
+    #[default]
+    Auto,
+    Pretty,
+    Json,
 }
 
 impl Config {
-    /// Load config from environment variables with dev-friendly defaults.
-    /// `ZUN_TOKEN` is required; everything else has a default.
-    /// TOML config file support comes later; env is sufficient for now.
-    pub fn from_env() -> anyhow::Result<Self> {
-        let data_dir = std::env::var("ZUN_DATA_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("./data"));
-        let bind_addr = std::env::var("ZUN_BIND").unwrap_or_else(|_| "127.0.0.1:8080".to_string());
-        let token = std::env::var("ZUN_TOKEN")
-            .map_err(|_| anyhow::anyhow!("ZUN_TOKEN env var is required"))?;
-        if token.len() < 16 {
-            anyhow::bail!("ZUN_TOKEN must be at least 16 characters");
+    pub fn load() -> anyhow::Result<Self> {
+        Self::from_file("config.toml")
+    }
+
+    fn from_file(path: impl AsRef<Path>) -> anyhow::Result<Self> {
+        let path = path.as_ref();
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| anyhow::anyhow!("cannot read {}: {}", path.display(), e))?;
+        let config: Self = toml::from_str(&text)
+            .map_err(|e| anyhow::anyhow!("invalid {}: {}", path.display(), e))?;
+        if config.token.len() < 16 {
+            anyhow::bail!("token must be at least 16 characters");
         }
-        let comfy_url =
-            std::env::var("ZUN_COMFY_URL").unwrap_or_else(|_| "http://127.0.0.1:8188".to_string());
-        Ok(Self {
-            data_dir,
-            bind_addr,
-            token,
-            comfy_url,
-        })
+        Ok(config)
     }
 }

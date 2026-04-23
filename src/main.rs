@@ -8,15 +8,14 @@ use zun_rust_server::{
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    logging::init()?;
-
-    let config = Config::from_env()?;
+    let config = Config::load()?;
+    logging::init(config.log_format)?;
     // Only log the first 8 chars of the token so you can eyeball a match
     // against the Android side without leaking the full secret into journald.
     let token_preview = format!("{}…", &config.token[..8.min(config.token.len())]);
     tracing::info!(
         data_dir = %config.data_dir.display(),
-        bind = %config.bind_addr,
+        bind = %config.bind,
         comfy = %config.comfy_url,
         token = %token_preview,
         "starting"
@@ -78,8 +77,8 @@ async fn main() -> anyhow::Result<()> {
         let _ = shutdown_tx.send(true);
     });
 
-    let listener = tokio::net::TcpListener::bind(&config.bind_addr).await?;
-    tracing::info!(addr = %config.bind_addr, "zun-rust-server listening");
+    let listener = tokio::net::TcpListener::bind(&config.bind).await?;
+    tracing::info!(addr = %config.bind, "zun-rust-server listening");
 
     let mut axum_shutdown_rx = shutdown_rx;
     // Use `into_make_service_with_connect_info` so the auth middleware can

@@ -1,0 +1,22 @@
+# Copy to config.toml (gitignored) and fill in your values.
+# Quickest start: cp config.example.toml config.toml, then set token.
+
+# Bearer token the Android app sends as `Authorization: Bearer <token>`.
+# Must be at least 16 characters. Generate one with:
+#   openssl rand -hex 32
+token = "1111111111111111"
+
+# Address the server listens on.
+# 127.0.0.1:8080  — dev (localhost only)
+# 192.168.1.x:8080 — home LAN
+# <tailscale-ip>:8080 — prod via Tailscale
+bind = "127.0.0.1:8080"
+
+# ComfyUI HTTP endpoint (project-zun's `just serve` default).
+comfy_url = "http://127.0.0.1:8188"
+
+# Where jobs.db, inputs/, outputs/, and thumbs/ are stored.
+data_dir = "./data"
+
+# Log format: "auto" (pretty on TTY, JSON otherwise), "pretty", or "json".
+log_format = "auto"

@@ -61,9 +61,10 @@ pub async fn test_app_with_comfy(comfy_url: &str) -> TestApp {
 
     let config = Config {
         data_dir: tempdir.path().to_path_buf(),
-        bind_addr: "127.0.0.1:0".to_string(),
+        bind: "127.0.0.1:0".into(),
         token: TEST_TOKEN.to_string(),
         comfy_url: comfy_url.to_string(),
+        log_format: zun_rust_server::config::LogFormat::Auto,
     };
     let comfy = ComfyClient::new(comfy_url).expect("comfy client");
     let (worker_tx, worker_rx) = mpsc::channel::<()>(1);

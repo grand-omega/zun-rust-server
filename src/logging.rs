@@ -39,41 +39,30 @@ use std::io::IsTerminal;
 
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
+use crate::config::LogFormat;
+
 pub const DEFAULT_FILTER: &str = "zun_rust_server=info,tower_http=info,audit=info";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LogFormat {
-    /// Human-readable multi-line records with ANSI colors.
-    Pretty,
-    /// One JSON object per line — for `jq`, journald, or any aggregator.
-    Json,
-}
-
-impl LogFormat {
-    fn from_env_or_tty() -> Self {
-        match std::env::var("ZUN_LOG_FORMAT").ok().as_deref() {
-            Some("json") => Self::Json,
-            Some("pretty") => Self::Pretty,
-            _ => {
-                if std::io::stderr().is_terminal() {
-                    Self::Pretty
-                } else {
-                    Self::Json
-                }
-            }
-        }
-    }
-}
-
 /// Install the global subscriber. Call once from `main`.
-pub fn init() -> anyhow::Result<()> {
+pub fn init(format: LogFormat) -> anyhow::Result<()> {
     let env_filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(DEFAULT_FILTER));
-    let format = LogFormat::from_env_or_tty();
+
+    let resolved = match format {
+        LogFormat::Pretty => LogFormat::Pretty,
+        LogFormat::Json => LogFormat::Json,
+        LogFormat::Auto => {
+            if std::io::stderr().is_terminal() {
+                LogFormat::Pretty
+            } else {
+                LogFormat::Json
+            }
+        }
+    };
 
     let registry = tracing_subscriber::registry().with(env_filter);
 
-    match format {
+    match resolved {
         LogFormat::Pretty => registry
             .with(fmt::layer().with_writer(std::io::stderr).with_target(true))
             .try_init()?,
@@ -87,36 +76,9 @@ pub fn init() -> anyhow::Result<()> {
                     .with_span_list(true),
             )
             .try_init()?,
+        LogFormat::Auto => unreachable!(),
     }
 
-    tracing::debug!(?format, filter = %std::env::var("RUST_LOG").unwrap_or_else(|_| DEFAULT_FILTER.to_string()), "logging initialised");
+    tracing::debug!(?resolved, "logging initialised");
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn log_format_env_override_to_json() {
-        // SAFETY: tests in this module don't share env state with parallel
-        // integration test binaries (they're in the unit-test binary).
-        // Still, serialize via a unique value scope.
-        // Use a closure to ensure we unset afterwards.
-        let prev = std::env::var("ZUN_LOG_FORMAT").ok();
-        unsafe {
-            std::env::set_var("ZUN_LOG_FORMAT", "json");
-        }
-        assert_eq!(LogFormat::from_env_or_tty(), LogFormat::Json);
-        unsafe {
-            std::env::set_var("ZUN_LOG_FORMAT", "pretty");
-        }
-        assert_eq!(LogFormat::from_env_or_tty(), LogFormat::Pretty);
-        unsafe {
-            match prev {
-                Some(v) => std::env::set_var("ZUN_LOG_FORMAT", v),
-                None => std::env::remove_var("ZUN_LOG_FORMAT"),
-            }
-        }
-    }
 }
