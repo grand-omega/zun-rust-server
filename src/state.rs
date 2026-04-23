@@ -3,7 +3,10 @@ use std::{collections::HashMap, sync::Arc};
 use sqlx::SqlitePool;
 use tokio::sync::mpsc;
 
-use crate::{Config, comfy::ComfyClient, comfy_monitor::ComfyHealthHandle, prompts::Prompt};
+use crate::{
+    Config, auth::AuthLimiter, comfy::ComfyClient, comfy_monitor::ComfyHealthHandle,
+    prompts::Prompt,
+};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -19,4 +22,6 @@ pub struct AppState {
     /// when a new job is inserted. `try_send` is always used — filling
     /// the channel means the worker already has one wake pending.
     pub worker_tx: mpsc::Sender<()>,
+    /// Per-IP sliding-window limiter for failed auth attempts.
+    pub auth_limiter: AuthLimiter,
 }

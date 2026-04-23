@@ -256,6 +256,57 @@ async fn get_thumb_requires_done_status() {
 }
 
 #[tokio::test]
+async fn get_input_sends_etag_and_honors_if_none_match() {
+    let app = common::test_app().await;
+    common::seed_job(
+        &app.db,
+        "etag-job",
+        "queued",
+        "test_prompt",
+        1_700_000_000,
+        None,
+    )
+    .await;
+    write_relative(
+        app._tempdir.path(),
+        "inputs/etag-job.jpg",
+        b"fake-jpeg-bytes",
+    )
+    .await;
+
+    // First request: no If-None-Match → 200 + ETag header.
+    let router = app.router.clone();
+    let resp = router
+        .clone()
+        .oneshot(authed("/api/jobs/etag-job/input"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let etag = resp
+        .headers()
+        .get("etag")
+        .expect("etag header present")
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(etag.starts_with('\"') && etag.ends_with('\"'));
+
+    // Second request with matching If-None-Match → 304, empty body.
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/jobs/etag-job/input")
+        .header("authorization", common::bearer(common::TEST_TOKEN))
+        .header("if-none-match", &etag)
+        .body(Body::empty())
+        .unwrap();
+    let resp2 = router.oneshot(req).await.unwrap();
+    assert_eq!(resp2.status(), StatusCode::NOT_MODIFIED);
+    assert_eq!(resp2.headers().get("etag").unwrap().to_str().unwrap(), etag);
+    let body = resp2.into_body().collect().await.unwrap().to_bytes();
+    assert!(body.is_empty());
+}
+
+#[tokio::test]
 async fn image_endpoints_require_auth() {
     let app = common::test_app().await;
     for uri in [
