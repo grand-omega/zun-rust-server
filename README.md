@@ -1,12 +1,12 @@
 # zun-rust-server
 
-A personal Rust server wrapping [project-zun](https://github.com/grand-omega/zun-rust-server/../project-zun)'s ComfyUI + FLUX2 setup for a single-user Android client. Handles job orchestration, persistence, and an HTTP API the app drives.
+A personal Rust server wrapping [project-zun](https://github.com/grand-omega/project-zun)'s ComfyUI + FLUX2 setup for a single-user Android client. Handles job orchestration, persistence, and an HTTP API the app drives.
 
-Single-user, self-hosted, designed to sit behind Tailscale. Deployed as a single static binary.
+Single-user, self-hosted. Runs on home LAN or Tailscale — no special network setup required.
 
 ## Status
 
-**v0.1.0** — API-complete for the Android client. End-to-end works against real FLUX2 klein (~7 s per job on RTX 4070 Ti Super). See [`CHANGELOG.md`](CHANGELOG.md) for scope, [`plan/PLAN.md`](plan/PLAN.md) for the full architecture, and [`ANDROID_TESTING.md`](ANDROID_TESTING.md) for client-integration notes.
+**v0.2.0** — API-complete, end-to-end verified against real FLUX2 klein (~7 s per job on RTX 4070 Ti Super).
 
 ## Quick start
 
@@ -15,45 +15,46 @@ Prerequisites:
 - ComfyUI running from `project-zun` (`just serve` there)
 
 ```bash
-export ZUN_TOKEN=$(openssl rand -hex 32)   # any ≥16 char string
-cargo run --release
+cp config.example.toml config.toml   # then edit: set token, bind address
+cp data/prompts.example.yaml data/prompts.yaml   # then edit with your real prompts
+just serve-dev
 ```
 
-Server listens on `127.0.0.1:8080`. Hit `/api/health` to check:
+Hit `/api/health` to verify:
 
 ```bash
 curl -s localhost:8080/api/health | jq
-# { "status": "ok", "version": "0.1.0", "comfy": { "ok": true, ... } }
+# { "status": "ok", "version": "0.2.0", "comfy": { "ok": true, ... } }
 ```
 
-## Environment variables
+## Configuration
 
-| Variable | Default | Purpose |
+All config lives in `config.toml` (gitignored). Copy from `config.example.toml`:
+
+| Key | Default | Purpose |
 |---|---|---|
-| `ZUN_TOKEN` | — (required) | Bearer token for the Android client |
-| `ZUN_BIND` | `127.0.0.1:8080` | Listen address |
-| `ZUN_DATA_DIR` | `./data` | Houses `jobs.db`, `inputs/`, `outputs/`, `thumbs/`, `workflows/`, `prompts.yaml` |
-| `ZUN_COMFY_URL` | `http://127.0.0.1:8188` | ComfyUI HTTP base |
-| `ZUN_LOG_FORMAT` | auto (pretty on TTY, JSON otherwise) | Log output format |
-| `RUST_LOG` | `zun_rust_server=info,tower_http=info,audit=info` | Log filter |
+| `token` | — (required) | Bearer token for the Android client |
+| `bind` | `0.0.0.0:8080` | Listen address — works on LAN and Tailscale simultaneously |
+| `comfy_url` | `http://127.0.0.1:8188` | ComfyUI HTTP base |
+| `data_dir` | `./data` | Houses `jobs.db`, `inputs/`, `outputs/`, `thumbs/`, `workflows/`, `prompts.yaml` |
+| `log_format` | `auto` | `auto` (pretty on TTY, JSON otherwise), `pretty`, or `json` |
+
+`RUST_LOG` env var still works for log-level tuning (e.g. `RUST_LOG=debug`).
 
 ## Developing
 
-Commit gate (pre-commit hook mirrors CI):
+```bash
+just serve-dev     # debug build
+just serve-prod    # release build
+```
+
+Commit gate (pre-commit hook):
 
 ```bash
-cargo fmt --all
+cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test
 ```
-
-One-time hook setup (untracked):
-
-```bash
-cp scripts/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
-```
-
-(Or just use the one I've had locally — see `.git/hooks/pre-commit` if you're on my workstation.)
 
 Workflow templates live in project-zun and are consumed via a symlink:
 
@@ -61,19 +62,22 @@ Workflow templates live in project-zun and are consumed via a symlink:
 ln -s ../../project-zun/workflows data/workflows
 ```
 
-## Architecture at a glance
+## Architecture
 
-- **axum 0.8** HTTP server on tokio.
-- **sqlx + SQLite** for the job queue (WAL, no Postgres).
-- **reqwest (rustls)** to ComfyUI — pure Rust TLS, no OpenSSL.
-- Background **worker** drains the queue one job at a time through ComfyUI; per-prompt timeout; graceful shutdown on SIGTERM.
-- Background **health monitor** probes ComfyUI's `/system_stats` every 30 s; state exposed on `/api/health`, transitions emit audit events.
-- **tracing + tower-http** for request-id spans, structured logs, and header redaction.
+- **axum 0.8** HTTP server on tokio
+- **sqlx + SQLite** (WAL) for the job queue — no external DB
+- **reqwest (rustls)** to ComfyUI — pure Rust, no OpenSSL
+- Background **worker** drains the queue one job at a time; per-prompt timeout; crash recovery on restart
+- Background **health monitor** probes ComfyUI every 30 s; state exposed on `/api/health`
+- **tracing + tower-http** for request-ID spans, structured logs, header redaction
+
+## Security
+
+Network boundary is the primary auth layer. On Tailscale, only enrolled devices can reach the server. On home LAN, only devices on the local network. A bearer token (`config.toml: token`) provides a second layer.
 
 ## Roadmap
 
-- **M7**: Tailscale IP bind + `tailscale cert` rustls termination.
-- **M8**: systemd unit, `/etc/zun/env`, log-rotation via journald.
-- **M9**: FLUX.1 Fill / LoRA workflow support, optional WebSocket progress, nightly cleanup.
+- **M8**: systemd unit for autostart on boot
+- **M9**: FLUX.1 Fill / LoRA workflow support, WebSocket progress, nightly cleanup task
 
-See `plan/PLAN.md` for the full milestone breakdown.
+See `plan/PLAN.md` for the full architecture and milestone breakdown.
