@@ -8,19 +8,34 @@ use zun_rust_server::{
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    logging::init()?;
-
-    let config = Config::from_env()?;
+    let config = Config::load()?;
+    logging::init(config.log_format)?;
+    // Only log the first 8 chars of the token so you can eyeball a match
+    // against the Android side without leaking the full secret into journald.
+    let token_preview = format!("{}…", &config.token[..8.min(config.token.len())]);
     tracing::info!(
         data_dir = %config.data_dir.display(),
-        bind = %config.bind_addr,
+        bind = %config.bind,
         comfy = %config.comfy_url,
+        token = %token_preview,
         "starting"
     );
 
     let pool = db::init(&config.data_dir).await?;
 
     let prompts_path = config.data_dir.join("prompts.yaml");
+    if !prompts_path.exists() {
+        let example = config.data_dir.join("prompts.example.yaml");
+        anyhow::bail!(
+            "prompts file not found: {}\n\
+             Create it from the template and edit with your prompts:\n    \
+             cp {} {}\n\
+             Or run `just setup` to bootstrap everything.",
+            prompts_path.display(),
+            example.display(),
+            prompts_path.display(),
+        );
+    }
     let prompts = prompts::load(&prompts_path)?;
     tracing::info!(n = prompts.len(), path = %prompts_path.display(), "prompts loaded");
 
@@ -62,8 +77,8 @@ async fn main() -> anyhow::Result<()> {
         let _ = shutdown_tx.send(true);
     });
 
-    let listener = tokio::net::TcpListener::bind(&config.bind_addr).await?;
-    tracing::info!(addr = %config.bind_addr, "zun-rust-server listening");
+    let listener = tokio::net::TcpListener::bind(&config.bind).await?;
+    tracing::info!(addr = %config.bind, "zun-rust-server listening");
 
     let mut axum_shutdown_rx = shutdown_rx;
     // Use `into_make_service_with_connect_info` so the auth middleware can
@@ -73,7 +88,6 @@ async fn main() -> anyhow::Result<()> {
         router(state).into_make_service_with_connect_info::<SocketAddr>(),
     )
     .with_graceful_shutdown(async move {
-        // Wait until the watched value flips.
         while !*axum_shutdown_rx.borrow() {
             if axum_shutdown_rx.changed().await.is_err() {
                 return;

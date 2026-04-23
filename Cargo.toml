@@ -10,6 +10,7 @@ chrono = { version = "0.4.44", features = ["serde"] }
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
 reqwest = { version = "0.13.2", default-features = false, features = ["rustls", "json", "multipart", "query", "http2", "charset"] }
 serde = { version = "1.0.228", features = ["derive"] }
+toml = "0.8"
 serde_json = "1.0.149"
 serde_yaml = "0.9.34"
 sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "sqlite", "macros", "migrate", "chrono"] }

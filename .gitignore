@@ -1,9 +1,11 @@
 /target
-# Local secret-bearing config (ZUN_TOKEN, etc.) — never committed.
-.env
-# Ignore everything under /data except the committed dev prompts and the
-# workflows symlink that points at ../../project-zun/workflows.
+# Local config (contains token) — never committed.
+config.toml
+# Ignore everything under /data except:
+#   - the workflows symlink pointing at ../../project-zun/workflows
+#   - the committed prompts template (prompts.example.yaml)
+# The real `data/prompts.yaml` stays local-only — never committed.
 /data/*
-!/data/prompts.yaml
 !/data/workflows
+!/data/prompts.example.yaml
 .claude
