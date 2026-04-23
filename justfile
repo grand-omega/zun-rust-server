@@ -82,6 +82,10 @@ serve-prod: _require-env
     echo "prod | bind=${ZUN_BIND} | data=./data | comfy=${ZUN_COMFY_URL:-http://127.0.0.1:8188}"
     cargo run --release
 
+# Run in production mode on home LAN (no Tailscale needed).
+serve-prod-home: _require-env
+    ZUN_BIND="192.168.1.15:8080" ZUN_LOG_FORMAT=json cargo run --release
+
 # Internal precondition: .env must exist and ZUN_TOKEN must be set.
 # Run `just setup` to create .env from the template.
 _require-env:
