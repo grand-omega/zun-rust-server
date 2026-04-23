@@ -12,6 +12,22 @@ set dotenv-load := true
 default:
     @just --list
 
+# Print the current ZUN_TOKEN from .env (full value). Handy when the
+# Android coder needs to mirror it in their local.properties.
+token:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ ! -f .env ]]; then
+        echo "error: .env does not exist. run: just setup" >&2
+        exit 1
+    fi
+    VAL=$(grep '^ZUN_TOKEN=' .env | cut -d= -f2- || true)
+    if [[ -z "$VAL" ]]; then
+        echo "error: ZUN_TOKEN= line in .env is empty" >&2
+        exit 1
+    fi
+    echo "$VAL"
+
 # First-time bootstrap: create .env with a fresh token, and copy the
 # prompts template if data/prompts.yaml doesn't exist. Idempotent — a
 # second `just setup` is a no-op on anything that already exists.

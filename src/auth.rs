@@ -41,11 +41,15 @@ pub async fn require_bearer(
     };
 
     if !token_eq(presented, &state.config.token) {
+        // Log the first 8 chars of what was offered so you can eyeball
+        // a match against the server's startup `token=...` line.
+        let presented_prefix = format!("{}…", &presented[..8.min(presented.len())]);
         tracing::warn!(
             target: "audit",
             event = "auth.denied",
             reason = "token_mismatch",
             %path,
+            presented = %presented_prefix,
         );
         return Err(AppError::Unauthorized);
     }

@@ -10,10 +10,14 @@ async fn main() -> anyhow::Result<()> {
     logging::init()?;
 
     let config = Config::from_env()?;
+    // Only log the first 8 chars of the token so you can eyeball a match
+    // against the Android side without leaking the full secret into journald.
+    let token_preview = format!("{}…", &config.token[..8.min(config.token.len())]);
     tracing::info!(
         data_dir = %config.data_dir.display(),
         bind = %config.bind_addr,
         comfy = %config.comfy_url,
+        token = %token_preview,
         "starting"
     );
 
