@@ -105,10 +105,12 @@ async fn submit_to_done_roundtrip_via_worker() {
         .mount(&comfy)
         .await;
 
-    // /view returns a minimal PNG-ish payload.
+    // /view returns a real (tiny) PNG so the worker's dimension
+    // extraction has something valid to decode.
+    let png = common::tiny_png(32, 24);
     Mock::given(method("GET"))
         .and(mock_path("/view"))
-        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"FAKE-PNG-BYTES".to_vec()))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(png.clone()))
         .mount(&comfy)
         .await;
 
@@ -156,12 +158,16 @@ async fn submit_to_done_roundtrip_via_worker() {
     assert_eq!(done["status"], "done");
     assert!(done["completed_at"].as_i64().unwrap() > 0);
 
-    // Output file should exist on disk with the fake bytes.
+    // Output file should exist on disk with the real PNG bytes.
     let output_rel = format!("outputs/zun_{job_id}_00001_.png");
     let output_abs = app._tempdir.path().join(&output_rel);
     assert!(output_abs.exists(), "output should be at {output_abs:?}");
     let bytes = std::fs::read(&output_abs).unwrap();
-    assert_eq!(bytes, b"FAKE-PNG-BYTES");
+    assert_eq!(bytes, png);
+
+    // Worker should have recorded dimensions from the PNG header.
+    assert_eq!(done["width"], 32);
+    assert_eq!(done["height"], 24);
 }
 
 #[tokio::test]

@@ -4,6 +4,7 @@ pub mod config;
 pub mod db;
 pub mod error;
 mod handlers;
+mod images;
 pub mod prompts;
 pub mod state;
 pub mod worker;
@@ -46,6 +47,9 @@ pub fn router(state: AppState) -> Router {
             "/api/jobs/{id}",
             get(handlers::get_job).delete(handlers::delete_job),
         )
+        .route("/api/jobs/{id}/input", get(images::get_input))
+        .route("/api/jobs/{id}/result", get(images::get_result))
+        .route("/api/jobs/{id}/thumb", get(images::get_thumb))
         .route("/api/debug/job", post(handlers::debug_create_job))
         .route("/api/debug/jobs", get(handlers::debug_list_jobs))
         .route_layer(middleware::from_fn_with_state(

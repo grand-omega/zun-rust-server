@@ -20,6 +20,9 @@ pub enum AppError {
     #[error("unknown prompt id: {0}")]
     UnknownPrompt(String),
 
+    #[error("job not ready yet")]
+    NotReady,
+
     #[error("internal error")]
     Internal(#[source] anyhow::Error),
 }
@@ -31,6 +34,7 @@ impl AppError {
             Self::NotFound => (StatusCode::NOT_FOUND, "not_found"),
             Self::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request"),
             Self::UnknownPrompt(_) => (StatusCode::BAD_REQUEST, "invalid_prompt_id"),
+            Self::NotReady => (StatusCode::CONFLICT, "not_ready"),
             Self::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
         }
     }

@@ -144,6 +144,22 @@ pub fn bearer(token: &str) -> String {
     format!("Bearer {token}")
 }
 
+/// Build a tiny real PNG (decodable by the `image` crate) for tests that
+/// need valid image bytes — e.g., worker output validation and thumbnail
+/// generation.
+#[allow(dead_code)]
+pub fn tiny_png(width: u32, height: u32) -> Vec<u8> {
+    use image::{DynamicImage, ImageFormat, RgbImage};
+    let img = RgbImage::from_fn(width, height, |x, y| {
+        image::Rgb([((x * 17) % 255) as u8, ((y * 31) % 255) as u8, 128])
+    });
+    let mut buf: Vec<u8> = Vec::new();
+    DynamicImage::ImageRgb8(img)
+        .write_to(&mut std::io::Cursor::new(&mut buf), ImageFormat::Png)
+        .expect("encode tiny png");
+    buf
+}
+
 /// Build a multipart/form-data body for submitting a job.
 #[allow(dead_code)]
 pub fn multipart_image_job(

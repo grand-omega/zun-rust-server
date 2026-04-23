@@ -114,14 +114,25 @@ async fn update_comfy_prompt_id(
     Ok(())
 }
 
-async fn mark_done(db: &SqlitePool, job_id: &str, output_path: &str) -> anyhow::Result<()> {
+async fn mark_done(
+    db: &SqlitePool,
+    job_id: &str,
+    output_path: &str,
+    width: Option<i64>,
+    height: Option<i64>,
+) -> anyhow::Result<()> {
     let now = chrono::Utc::now().timestamp();
-    sqlx::query("UPDATE jobs SET status = 'done', output_path = ?, completed_at = ? WHERE id = ?")
-        .bind(output_path)
-        .bind(now)
-        .bind(job_id)
-        .execute(db)
-        .await?;
+    sqlx::query(
+        "UPDATE jobs SET status = 'done', output_path = ?, completed_at = ?, \
+         width = ?, height = ? WHERE id = ?",
+    )
+    .bind(output_path)
+    .bind(now)
+    .bind(width)
+    .bind(height)
+    .bind(job_id)
+    .execute(db)
+    .await?;
     Ok(())
 }
 
@@ -210,7 +221,21 @@ async fn process_job(state: &AppState, job: &QueuedJob) -> anyhow::Result<()> {
     }
     tokio::fs::write(&abs_output, &bytes).await?;
 
-    mark_done(&state.db, &job.id, &rel_output).await?;
+    // Cheap dimension read via image's ImageReader::into_dimensions;
+    // non-fatal if the file isn't a decodable image (shouldn't happen
+    // since ComfyUI produces PNGs, but we don't want this to fail the job).
+    let abs_output_for_read = abs_output.clone();
+    let (width, height) = tokio::task::spawn_blocking(move || {
+        image::ImageReader::open(&abs_output_for_read)
+            .ok()
+            .and_then(|r| r.into_dimensions().ok())
+    })
+    .await
+    .unwrap_or(None)
+    .map(|(w, h)| (Some(w as i64), Some(h as i64)))
+    .unwrap_or((None, None));
+
+    mark_done(&state.db, &job.id, &rel_output, width, height).await?;
     tracing::info!(
         job_id = %job.id,
         output = %rel_output,

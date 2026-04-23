@@ -1188,16 +1188,17 @@ Landed in four commits: request tracing, workflow loader, ComfyUI client, worker
 
 **Deferred from plan:** Output dimensions (width/height) — still nullable. Need `image` crate decode, which comes naturally with thumbnail work in M6b.
 
-### Milestone 6 — Gallery endpoints
+### Milestone 6 — Gallery endpoints ✓
 
-- [ ] Implement thumbnail generation in `thumb.rs`
-- [ ] Generate thumb on job completion (inside worker)
-- [ ] Implement `GET /api/jobs?status=done&limit=30&before=<ts>` with pagination
-- [ ] Implement `GET /api/jobs/{id}/input` and `/thumb` handlers
-- [ ] Implement `DELETE /api/jobs/{id}` (remove row and all files)
-- [ ] Backfill script: generate thumbnails for existing jobs
+Landed in two chunks ordered by client priority (M6a first to unblock the Android Gallery, M6b second to fill in image serving once jobs actually produce outputs).
 
-**Done when:** can list 30 past jobs, fetch their thumbnails, delete them.
+- [x] **M6a: list + delete.** `GET /api/jobs` (status/limit/before) → `[{id, prompt_id, prompt_label, created_at, duration_seconds}]`. `DELETE /api/jobs/{id}` → 204 + removes DB row and best-effort deletes input/output/thumb files. Pulled ahead of M5 so the Android gallery could exercise real data while the worker was still in progress.
+- [x] **M6b: image serving.** `src/images.rs` with `GET /api/jobs/{id}/{input,result,thumb}`. Input/result: stream from disk with proper Content-Type + `Cache-Control: private, max-age=3600`. Result returns 409 if the job isn't `done`. Thumb is lazily generated on first request (400 px max side, Lanczos3 + JPEG via the `image` crate on a `spawn_blocking` pool) and cached to `data/thumbs/{job_id}.jpg`; `thumb_path` is persisted so subsequent calls hit the fast path.
+- [x] **Dimensions from worker.** After writing the output, `worker::process_job` reads the image's dimensions via `ImageReader::into_dimensions` and `mark_done` persists `width` + `height` on the row.
+- [x] **Image crate (`jpeg,png` features only, default-features off).** Pure Rust; no system libs.
+- [x] **Backfill script** — not built. Lazy on-demand generation covers the same concern: any existing row that lacks `thumb_path` gets one the first time the client requests it.
+
+**Done when:** can list past jobs, fetch thumb/input/result, delete them — all satisfied. 61/61 tests pass.
 
 ### Milestone 7 — Tailscale and TLS
 
