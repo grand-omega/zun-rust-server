@@ -24,28 +24,93 @@ use serde_json::Value;
 #[derive(Clone)]
 pub struct ComfyClient {
     base: String,
+    /// Client used for job-related traffic; generous 60s timeout since
+    /// /upload/image and /view can ship MBs.
     http: Client,
+    /// Dedicated client for `/system_stats` health probes with a short
+    /// timeout so a stuck ComfyUI doesn't stall the monitor loop.
+    health_http: Client,
+}
+
+/// Number of attempts (including the first) for idempotent ComfyUI calls.
+const MAX_ATTEMPTS: u32 = 3;
+/// Base backoff applied as `BASE << (attempt - 1)` between retries.
+const BASE_BACKOFF: Duration = Duration::from_millis(500);
+
+/// How aggressively to retry a given call. `submit_prompt` is not safe to
+/// retry after a partially-sent request since ComfyUI may have already
+/// accepted the prompt and we'd duplicate work; everything else is a pure
+/// read or idempotent write.
+#[derive(Copy, Clone)]
+enum Idempotency {
+    Safe,
+    ConnectOnly,
+}
+
+fn should_retry(err: &anyhow::Error, mode: Idempotency) -> bool {
+    let Some(e) = err.downcast_ref::<reqwest::Error>() else {
+        return false;
+    };
+    match mode {
+        Idempotency::ConnectOnly => e.is_connect(),
+        Idempotency::Safe => {
+            if e.is_connect() || e.is_timeout() {
+                return true;
+            }
+            if let Some(status) = e.status() {
+                let code = status.as_u16();
+                return code == 408 || code == 429 || status.is_server_error();
+            }
+            false
+        }
+    }
+}
+
+async fn with_retry<F, Fut, T>(name: &str, mode: Idempotency, mut op: F) -> anyhow::Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<T>>,
+{
+    let mut attempt: u32 = 1;
+    loop {
+        match op().await {
+            Ok(v) => return Ok(v),
+            Err(e) => {
+                if attempt >= MAX_ATTEMPTS || !should_retry(&e, mode) {
+                    return Err(e);
+                }
+                let delay = BASE_BACKOFF * (1u32 << (attempt - 1));
+                tracing::warn!(
+                    op = name,
+                    attempt,
+                    next_delay_ms = delay.as_millis() as u64,
+                    error = %e,
+                    "transient comfy error; retrying",
+                );
+                tokio::time::sleep(delay).await;
+                attempt += 1;
+            }
+        }
+    }
 }
 
 impl ComfyClient {
     pub fn new(base: impl Into<String>) -> anyhow::Result<Self> {
-        let http = Client::builder()
-            // Generous per-request timeout. The worker wraps the poll loop in
-            // its own overall timeout; this just protects against a single
-            // stuck TCP dial.
-            .timeout(Duration::from_secs(60))
-            .build()?;
+        let http = Client::builder().timeout(Duration::from_secs(60)).build()?;
+        let health_http = Client::builder().timeout(Duration::from_secs(10)).build()?;
         Ok(Self {
             base: base.into(),
             http,
+            health_http,
         })
     }
 
-    /// Upload an input image. Returns the name ComfyUI stored it under
-    /// (what a `LoadImage` node should reference).
-    pub async fn upload_image(&self, bytes: Vec<u8>, filename: &str) -> anyhow::Result<String> {
+    async fn upload_image_once(&self, bytes: &[u8], filename: &str) -> anyhow::Result<String> {
         let form = Form::new()
-            .part("image", Part::bytes(bytes).file_name(filename.to_string()))
+            .part(
+                "image",
+                Part::bytes(bytes.to_vec()).file_name(filename.to_string()),
+            )
             .text("type", "input")
             .text("overwrite", "true");
         let resp: Value = self
@@ -63,8 +128,16 @@ impl ComfyClient {
             .ok_or_else(|| anyhow::anyhow!("upload_image response missing `name`: {resp}"))
     }
 
-    /// Submit an already-patched workflow. Returns ComfyUI's prompt id.
-    pub async fn submit_prompt(&self, workflow: &Value) -> anyhow::Result<String> {
+    /// Upload an input image. Returns the name ComfyUI stored it under
+    /// (what a `LoadImage` node should reference).
+    pub async fn upload_image(&self, bytes: Vec<u8>, filename: &str) -> anyhow::Result<String> {
+        with_retry("upload_image", Idempotency::Safe, || {
+            self.upload_image_once(&bytes, filename)
+        })
+        .await
+    }
+
+    async fn submit_prompt_once(&self, workflow: &Value) -> anyhow::Result<String> {
         let resp: Value = self
             .http
             .post(format!("{}/prompt", self.base))
@@ -80,10 +153,17 @@ impl ComfyClient {
             .ok_or_else(|| anyhow::anyhow!("submit_prompt response missing `prompt_id`: {resp}"))
     }
 
-    /// Fetch history for a prompt. `Ok(None)` means "not executed yet"
-    /// (ComfyUI returns `{}` until the entry materialises). `Ok(Some(...))`
-    /// means the entry exists — caller should check `status.status_str`.
-    pub async fn get_history(&self, prompt_id: &str) -> anyhow::Result<Option<HistoryEntry>> {
+    /// Submit an already-patched workflow. Returns ComfyUI's prompt id.
+    pub async fn submit_prompt(&self, workflow: &Value) -> anyhow::Result<String> {
+        // ConnectOnly: a retry after a timeout mid-request could duplicate
+        // the submission since ComfyUI may have already accepted it.
+        with_retry("submit_prompt", Idempotency::ConnectOnly, || {
+            self.submit_prompt_once(workflow)
+        })
+        .await
+    }
+
+    async fn get_history_once(&self, prompt_id: &str) -> anyhow::Result<Option<HistoryEntry>> {
         let resp: Value = self
             .http
             .get(format!("{}/history/{prompt_id}", self.base))
@@ -98,10 +178,21 @@ impl ComfyClient {
         }
     }
 
+    /// Fetch history for a prompt. `Ok(None)` means "not executed yet"
+    /// (ComfyUI returns `{}` until the entry materialises). `Ok(Some(...))`
+    /// means the entry exists — caller should check `status.status_str`.
+    pub async fn get_history(&self, prompt_id: &str) -> anyhow::Result<Option<HistoryEntry>> {
+        with_retry("get_history", Idempotency::Safe, || {
+            self.get_history_once(prompt_id)
+        })
+        .await
+    }
+
     /// Lightweight liveness probe. Succeeds if ComfyUI answers `/system_stats`
-    /// with a 2xx. Used by the background health monitor.
+    /// with a 2xx. Used by the background health monitor. Uses a dedicated
+    /// short-timeout client so a stuck ComfyUI doesn't stall the probe loop.
     pub async fn health(&self) -> anyhow::Result<()> {
-        self.http
+        self.health_http
             .get(format!("{}/system_stats", self.base))
             .send()
             .await?
@@ -109,9 +200,7 @@ impl ComfyClient {
         Ok(())
     }
 
-    /// Download a produced output (image, mask, etc). Bytes are whatever
-    /// content-type ComfyUI serves — typically `image/png` for FLUX outputs.
-    pub async fn view(
+    async fn view_once(
         &self,
         filename: &str,
         subfolder: &str,
@@ -129,6 +218,20 @@ impl ComfyClient {
             .await?
             .error_for_status()?;
         Ok(resp.bytes().await?.to_vec())
+    }
+
+    /// Download a produced output (image, mask, etc). Bytes are whatever
+    /// content-type ComfyUI serves — typically `image/png` for FLUX outputs.
+    pub async fn view(
+        &self,
+        filename: &str,
+        subfolder: &str,
+        type_: &str,
+    ) -> anyhow::Result<Vec<u8>> {
+        with_retry("view", Idempotency::Safe, || {
+            self.view_once(filename, subfolder, type_)
+        })
+        .await
     }
 }
 
@@ -351,5 +454,53 @@ mod tests {
         let client = ComfyClient::new(server.uri()).unwrap();
         let bytes = client.view("zun_foo.png", "", "output").await.unwrap();
         assert_eq!(bytes, b"PNG-BYTES");
+    }
+
+    #[tokio::test]
+    async fn upload_image_retries_transient_5xx_then_succeeds() {
+        // Two 503 responses followed by a 200 — upload_image should retry
+        // and ultimately succeed within MAX_ATTEMPTS.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(mock_path("/upload/image"))
+            .respond_with(ResponseTemplate::new(503))
+            .up_to_n_times(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(mock_path("/upload/image"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({ "name": "zun_final.jpg" })),
+            )
+            .mount(&server)
+            .await;
+
+        let client = ComfyClient::new(server.uri()).unwrap();
+        let name = client
+            .upload_image(b"x".to_vec(), "zun_final.jpg")
+            .await
+            .expect("retry path should recover");
+        assert_eq!(name, "zun_final.jpg");
+    }
+
+    #[tokio::test]
+    async fn non_transient_4xx_is_not_retried() {
+        // A 400 Bad Request should fail on the first attempt with no retry.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(mock_path("/upload/image"))
+            .respond_with(ResponseTemplate::new(400))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = ComfyClient::new(server.uri()).unwrap();
+        let err = client
+            .upload_image(b"x".to_vec(), "x.jpg")
+            .await
+            .expect_err("400 is not transient");
+        let s = format!("{err}");
+        assert!(s.contains("400"), "expected status in error, got: {s}");
+        // Drop the server — on drop wiremock verifies `.expect(1)`.
     }
 }
