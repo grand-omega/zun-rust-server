@@ -19,9 +19,8 @@ async fn main() -> anyhow::Result<()> {
 
     let pool = db::init(&config.data_dir).await?;
 
-    let prompts_path = config.data_dir.join("prompts.yaml");
-    let prompts = prompts::load(&prompts_path)?;
-    tracing::info!(n = prompts.len(), path = %prompts_path.display(), "prompts loaded");
+    let prompts = prompts::load(&config.prompts_path)?;
+    tracing::info!(n = prompts.len(), path = %config.prompts_path.display(), "prompts loaded");
 
     let workflows_dir = config.data_dir.join("workflows");
     let workflows = workflow::load_templates(&workflows_dir)?;
