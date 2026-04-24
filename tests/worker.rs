@@ -127,7 +127,7 @@ async fn submit_to_done_roundtrip_via_worker() {
         .oneshot(authed_post_submit(&ct, body))
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::CREATED);
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
     let job_id = body_json(resp).await["job_id"]
         .as_str()
         .unwrap()
@@ -222,6 +222,104 @@ async fn worker_marks_failed_on_comfy_execution_error() {
         err.contains("comfyui execution failed"),
         "unexpected error message: {err}"
     );
+}
+
+#[tokio::test]
+async fn worker_exits_cleanly_when_idle_on_shutdown() {
+    // Empty queue: worker should be parked on the idle select. Shutdown
+    // should wake it immediately and it should return from run().
+    let comfy = MockServer::start().await;
+    let mut app = common::test_app_with_comfy(&comfy.uri()).await;
+    let (handle, shutdown_tx) = common::spawn_worker_with_shutdown(&mut app);
+
+    shutdown_tx.send(true).expect("send shutdown");
+
+    tokio::time::timeout(Duration::from_secs(2), handle)
+        .await
+        .expect("worker did not exit within 2s of shutdown signal")
+        .expect("worker task panicked");
+}
+
+#[tokio::test]
+async fn worker_drains_in_flight_job_then_exits_on_shutdown() {
+    // Worker should finish the current job even if shutdown fires while
+    // it's in flight (see worker.rs comment: interrupting ComfyUI mid-run
+    // leaves orphaned GPU state). To get the worker *into* process_job
+    // before firing shutdown, we delay the upload response so the worker
+    // is blocked in state.comfy.upload_image when shutdown arrives.
+    let comfy = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(mock_path("/upload/image"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(Duration::from_millis(400))
+                .set_body_json(
+                    json!({ "name": "zun_upload.jpg", "subfolder": "", "type": "input" }),
+                ),
+        )
+        .mount(&comfy)
+        .await;
+    Mock::given(method("POST"))
+        .and(mock_path("/prompt"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({ "prompt_id": "drain-prompt" })),
+        )
+        .mount(&comfy)
+        .await;
+    let png = common::tiny_png(16, 16);
+    Mock::given(method("GET"))
+        .and(mock_path("/view"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(png.clone()))
+        .mount(&comfy)
+        .await;
+
+    let mut app = common::test_app_with_comfy(&comfy.uri()).await;
+    common::seed_workflow(&mut app, "flux2_klein_edit", minimal_workflow());
+    let router = app.router.clone();
+
+    let (ct, body) =
+        common::multipart_image_job(b"fake-jpeg-bytes", "image/jpeg", common::KNOWN_PROMPT_ID);
+    let resp = router
+        .clone()
+        .oneshot(authed_post_submit(&ct, body))
+        .await
+        .unwrap();
+    let job_id = body_json(resp).await["job_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    Mock::given(method("GET"))
+        .and(mock_path("/history/drain-prompt"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "drain-prompt": {
+                "status": { "completed": true, "status_str": "success", "messages": [] },
+                "outputs": {
+                    "19": { "images": [
+                        { "filename": format!("zun_{job_id}_00001_.png"), "subfolder": "", "type": "output" }
+                    ] }
+                }
+            }
+        })))
+        .mount(&comfy)
+        .await;
+
+    let (handle, shutdown_tx) = common::spawn_worker_with_shutdown(&mut app);
+
+    // Give the worker time to pick up the job and enter process_job (where
+    // it now blocks on the delayed upload_image mock). Then fire shutdown.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    shutdown_tx.send(true).expect("send shutdown");
+
+    tokio::time::timeout(Duration::from_secs(5), handle)
+        .await
+        .expect("worker did not exit within 5s of shutdown signal")
+        .expect("worker task panicked");
+
+    // The in-flight job must have drained to `done`, not left running.
+    let final_status = wait_for_status(&router, &job_id, "done", Duration::from_secs(1)).await;
+    assert_eq!(final_status["status"], "done");
 }
 
 #[tokio::test]

@@ -36,8 +36,7 @@ async fn main() -> anyhow::Result<()> {
             prompts_path.display(),
         );
     }
-    let prompts = prompts::load(&prompts_path)?;
-    tracing::info!(n = prompts.len(), path = %prompts_path.display(), "prompts loaded");
+    let mut prompts = prompts::load(&prompts_path)?;
 
     let workflows_dir = config.data_dir.join("workflows");
     let workflows = workflow::load_templates(&workflows_dir)?;
@@ -46,6 +45,18 @@ async fn main() -> anyhow::Result<()> {
         dir = %workflows_dir.display(),
         "workflow templates loaded"
     );
+
+    if !workflows.contains_key(&config.custom_prompt_workflow) {
+        let available: Vec<_> = workflows.keys().collect();
+        anyhow::bail!(
+            "custom_prompt_workflow '{}' not found in {}; available: {:?}",
+            config.custom_prompt_workflow,
+            workflows_dir.display(),
+            available,
+        );
+    }
+    prompts::inject_custom(&mut prompts, config.custom_prompt_workflow.clone());
+    tracing::info!(n = prompts.len(), path = %prompts_path.display(), "prompts loaded");
 
     let comfy = ComfyClient::new(&config.comfy_url)?;
     let comfy_health = comfy_monitor::new_handle();

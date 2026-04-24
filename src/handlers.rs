@@ -1,55 +1,16 @@
 use axum::{
     Json,
     extract::{Multipart, Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, HeaderValue, StatusCode, header},
+    response::{IntoResponse, Response},
 };
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::{AppError, AppState, prompts::PromptDto};
-
-// ---------- debug (M2) ----------
-
-pub async fn debug_create_job(
-    State(state): State<AppState>,
-) -> Result<Json<serde_json::Value>, AppError> {
-    let id = uuid::Uuid::new_v4().to_string();
-    let now = chrono::Utc::now().timestamp();
-    sqlx::query(
-        "INSERT INTO jobs (id, status, prompt_id, input_path, created_at) \
-         VALUES (?, 'queued', 'debug', 'debug-input', ?)",
-    )
-    .bind(&id)
-    .bind(now)
-    .execute(&state.db)
-    .await?;
-
-    Ok(Json(json!({ "id": id })))
-}
-
-pub async fn debug_list_jobs(
-    State(state): State<AppState>,
-) -> Result<Json<serde_json::Value>, AppError> {
-    let rows: Vec<(String, String, String, i64)> = sqlx::query_as(
-        "SELECT id, status, prompt_id, created_at FROM jobs ORDER BY created_at DESC LIMIT 50",
-    )
-    .fetch_all(&state.db)
-    .await?;
-
-    let items: Vec<_> = rows
-        .into_iter()
-        .map(|(id, status, prompt_id, created_at)| {
-            json!({
-                "id": id,
-                "status": status,
-                "prompt_id": prompt_id,
-                "created_at": created_at,
-            })
-        })
-        .collect();
-
-    Ok(Json(json!(items)))
-}
+use crate::{
+    AppError, AppState, MAX_UPLOAD_BYTES,
+    prompts::{CUSTOM_PROMPT_ID, PromptDto},
+};
 
 // ---------- prompts (M4) ----------
 
@@ -64,10 +25,15 @@ pub async fn list_prompts(State(state): State<AppState>) -> Json<Vec<PromptDto>>
 pub async fn submit_job(
     State(state): State<AppState>,
     mut multipart: Multipart,
-) -> Result<(StatusCode, Json<serde_json::Value>), AppError> {
+) -> Result<(StatusCode, HeaderMap, Json<serde_json::Value>), AppError> {
+    let max_mb = MAX_UPLOAD_BYTES / (1024 * 1024);
+    let image_field_hint =
+        format!("multipart field 'image', image/jpeg or image/png, max {max_mb} MB");
+
     let mut image_bytes: Option<Vec<u8>> = None;
     let mut image_ext: Option<&'static str> = None;
     let mut prompt_id: Option<String> = None;
+    let mut custom_prompt: Option<String> = None;
 
     while let Some(field) = multipart.next_field().await? {
         match field.name() {
@@ -78,7 +44,7 @@ pub async fn submit_job(
                     "image/png" => "png",
                     other => {
                         return Err(AppError::BadRequest(format!(
-                            "unsupported image content-type: {other}"
+                            "unsupported image content-type '{other}' (expected image/jpeg or image/png)"
                         )));
                     }
                 });
@@ -87,20 +53,44 @@ pub async fn submit_job(
             Some("prompt_id") => {
                 prompt_id = Some(field.text().await?);
             }
+            Some("custom_prompt") => {
+                custom_prompt = Some(field.text().await?);
+            }
             _ => { /* ignore unknown fields */ }
         }
     }
 
-    let image_bytes =
-        image_bytes.ok_or_else(|| AppError::BadRequest("image field is required".into()))?;
-    let image_ext =
-        image_ext.ok_or_else(|| AppError::BadRequest("image field is required".into()))?;
-    let prompt_id =
-        prompt_id.ok_or_else(|| AppError::BadRequest("prompt_id field is required".into()))?;
+    let image_bytes = image_bytes.ok_or_else(|| {
+        AppError::BadRequest(format!("image field is required ({image_field_hint})"))
+    })?;
+    let image_ext = image_ext.ok_or_else(|| {
+        AppError::BadRequest(format!("image field is required ({image_field_hint})"))
+    })?;
+    let prompt_id = prompt_id.ok_or_else(|| {
+        AppError::BadRequest(
+            "prompt_id field is required (multipart field 'prompt_id'; see GET /api/prompts)"
+                .into(),
+        )
+    })?;
 
     if !state.prompts.contains_key(&prompt_id) {
         return Err(AppError::UnknownPrompt(prompt_id));
     }
+
+    // For __custom__, require a non-empty custom_prompt text.
+    // For regular prompts, discard any custom_prompt the client may have sent.
+    let custom_prompt = if prompt_id == CUSTOM_PROMPT_ID {
+        let text = custom_prompt
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| {
+                AppError::BadRequest(
+                    "custom_prompt is required (non-empty) when prompt_id=__custom__".into(),
+                )
+            })?;
+        Some(text)
+    } else {
+        None
+    };
 
     let job_id = uuid::Uuid::new_v4().to_string();
     let rel_input = format!("inputs/{job_id}.{image_ext}");
@@ -112,11 +102,12 @@ pub async fn submit_job(
 
     let now = chrono::Utc::now().timestamp();
     sqlx::query(
-        "INSERT INTO jobs (id, status, prompt_id, input_path, created_at) \
-         VALUES (?, 'queued', ?, ?, ?)",
+        "INSERT INTO jobs (id, status, prompt_id, custom_prompt, input_path, created_at) \
+         VALUES (?, 'queued', ?, ?, ?, ?)",
     )
     .bind(&job_id)
     .bind(&prompt_id)
+    .bind(&custom_prompt)
     .bind(&rel_input)
     .bind(now)
     .execute(&state.db)
@@ -131,10 +122,21 @@ pub async fn submit_job(
         event = "job.submitted",
         %job_id,
         %prompt_id,
+        custom_prompt = custom_prompt.as_deref().unwrap_or(""),
         input_bytes = image_bytes.len(),
     );
 
-    Ok((StatusCode::CREATED, Json(json!({ "job_id": job_id }))))
+    // 202 Accepted: the job is queued, not yet complete. Location points at
+    // the canonical poll URL for the newly created resource.
+    let mut headers = HeaderMap::new();
+    if let Ok(loc) = HeaderValue::from_str(&format!("/api/jobs/{job_id}")) {
+        headers.insert(header::LOCATION, loc);
+    }
+    Ok((
+        StatusCode::ACCEPTED,
+        headers,
+        Json(json!({ "job_id": job_id })),
+    ))
 }
 
 #[derive(Deserialize, Default)]
@@ -148,6 +150,7 @@ pub struct ListQuery {
 struct JobSummaryRow {
     id: String,
     prompt_id: String,
+    custom_prompt: Option<String>,
     created_at: i64,
     completed_at: Option<i64>,
 }
@@ -155,13 +158,13 @@ struct JobSummaryRow {
 pub async fn list_jobs(
     State(state): State<AppState>,
     Query(q): Query<ListQuery>,
-) -> Result<Json<serde_json::Value>, AppError> {
+) -> Result<Response, AppError> {
     let status = q.status.as_deref().unwrap_or("done");
     let limit = q.limit.unwrap_or(30).clamp(1, 100);
 
     let rows: Vec<JobSummaryRow> = if let Some(before) = q.before {
         sqlx::query_as(
-            "SELECT id, prompt_id, created_at, completed_at FROM jobs \
+            "SELECT id, prompt_id, custom_prompt, created_at, completed_at FROM jobs \
              WHERE status = ? AND created_at < ? \
              ORDER BY created_at DESC LIMIT ?",
         )
@@ -172,7 +175,7 @@ pub async fn list_jobs(
         .await?
     } else {
         sqlx::query_as(
-            "SELECT id, prompt_id, created_at, completed_at FROM jobs \
+            "SELECT id, prompt_id, custom_prompt, created_at, completed_at FROM jobs \
              WHERE status = ? \
              ORDER BY created_at DESC LIMIT ?",
         )
@@ -182,22 +185,43 @@ pub async fn list_jobs(
         .await?
     };
 
+    // If the page is full, the caller may want more. The oldest row's
+    // created_at is the cursor for the next page (rows are ordered DESC).
+    let next_before = (rows.len() as i64 == limit)
+        .then(|| rows.last().map(|r| r.created_at))
+        .flatten();
+
     let items: Vec<_> = rows
         .into_iter()
         .map(|row| {
             let duration_seconds = row.completed_at.map(|completed| completed - row.created_at);
-            let prompt_label = state.prompts.get(&row.prompt_id).map(|p| p.label.clone());
+            let prompt_label = row
+                .custom_prompt
+                .clone()
+                .or_else(|| state.prompts.get(&row.prompt_id).map(|p| p.label.clone()));
             json!({
                 "id": row.id,
                 "prompt_id": row.prompt_id,
                 "prompt_label": prompt_label,
+                "custom_prompt": row.custom_prompt,
                 "created_at": row.created_at,
                 "duration_seconds": duration_seconds,
             })
         })
         .collect();
 
-    Ok(Json(json!(items)))
+    let mut resp = Json(json!(items)).into_response();
+    if let Some(before) = next_before {
+        let link =
+            format!("</api/jobs?status={status}&limit={limit}&before={before}>; rel=\"next\"");
+        // from_str rejects CR/LF and other control bytes. If `status` is
+        // malformed enough to invalidate the header, skip emission rather
+        // than fail the whole request.
+        if let Ok(v) = HeaderValue::from_str(&link) {
+            resp.headers_mut().insert(header::LINK, v);
+        }
+    }
+    Ok(resp)
 }
 
 #[derive(sqlx::FromRow)]
@@ -264,6 +288,7 @@ struct JobStatusRow {
     id: String,
     status: String,
     prompt_id: String,
+    custom_prompt: Option<String>,
     error_message: Option<String>,
     created_at: i64,
     completed_at: Option<i64>,
@@ -276,21 +301,25 @@ pub async fn get_job(
     Path(job_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let row: JobStatusRow = sqlx::query_as(
-        "SELECT id, status, prompt_id, error_message, created_at, completed_at, width, height \
-         FROM jobs WHERE id = ?",
+        "SELECT id, status, prompt_id, custom_prompt, error_message, \
+         created_at, completed_at, width, height FROM jobs WHERE id = ?",
     )
     .bind(&job_id)
     .fetch_optional(&state.db)
     .await?
     .ok_or(AppError::NotFound)?;
 
-    let prompt_label = state.prompts.get(&row.prompt_id).map(|p| p.label.clone());
+    let prompt_label = row
+        .custom_prompt
+        .clone()
+        .or_else(|| state.prompts.get(&row.prompt_id).map(|p| p.label.clone()));
 
     Ok(Json(json!({
         "id": row.id,
         "status": row.status,
         "prompt_id": row.prompt_id,
         "prompt_label": prompt_label,
+        "custom_prompt": row.custom_prompt,
         "progress": serde_json::Value::Null,
         "error": row.error_message,
         "created_at": row.created_at,

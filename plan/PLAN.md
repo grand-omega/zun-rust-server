@@ -1,8 +1,8 @@
 # zun-rust-server — Development Plan
 
 > A personal Rust server wrapping ComfyUI (via [project-zun](../project-zun))
-> for an Android client. Single-user, self-hosted behind Tailscale.
-> Deployed as a single static binary via systemd.
+> for an Android client. Single-user, self-hosted.
+> Deployed as a single static binary. Runs on home LAN or Tailscale.
 >
 > Models: FLUX 2 klein (daily driver) plus FLUX.1 Fill and future workflows.
 > Pure-Rust dependency posture (rustls everywhere, no system libs) so the
@@ -66,20 +66,17 @@ The Python side (project-zun) ships ~10 workflow JSON templates across two model
 
 ### Target deployment
 
-A Linux server (Ubuntu 24.04 or similar) with a GPU capable of running FLUX2 via ComfyUI. Server reachable from the developer's Android phone via Tailscale. Deployed as a systemd service; configured via a small TOML file plus environment variables for secrets.
+A Linux workstation with a GPU running FLUX2 via ComfyUI. Server reachable from the Android phone over home LAN or Tailscale — both work simultaneously since the server binds to `0.0.0.0`. Configured entirely via `config.toml`.
 
-### Dev-time defaults (kickoff decisions)
+### Defaults
 
-Conventions for local development; prod overrides come from `config.toml`.
-
-- **Data directory:** `./data/` inside this repo (gitignored). Houses `jobs.db`, `inputs/`, `outputs/`, `thumbs/`, `workflows/`, `prompts.yaml`.
-- **Workflows directory:** `./data/workflows/` is a **symlink** to `../project-zun/workflows/` — project-zun is the source of truth; edits to a workflow JSON propagate without a copy step. Setup: `ln -s ../../project-zun/workflows data/workflows`.
-- **Prompts file:** `./data/prompts.yaml` committable with **placeholder dev prompts** (not gitignored in dev). User swaps in real "secret" prompts later; at that point we flip the gitignore.
-- **ComfyUI URL:** `http://127.0.0.1:8188` (project-zun's `just serve` default).
-- **Bind address:** `127.0.0.1:8080` for dev (plain HTTP). Tailscale IP + TLS come at M7.
-- **Android client absent.** API correctness is verified entirely via Rust integration tests (`tests/*.rs` using `tower::ServiceExt::oneshot`) and `scripts/test.sh` curl smoke tests. No client-side contract review possible yet — the server is the spec.
-- **Progress reporting:** not in v1. `GET /api/jobs/{id}` always returns `progress: null`. Android will get real progress when we add the WebSocket bridge in a later milestone.
-- **Image format on the wire:** outputs served as PNG as-is, thumbnails as 400 px JPEG. No format negotiation / transcoding until we have real mobile-bandwidth complaints.
+- **Config:** `config.toml` (gitignored). Copy from `config.example.toml` and edit.
+- **Data directory:** `./data/` — houses `jobs.db`, `inputs/`, `outputs/`, `thumbs/`, `workflows/`, `prompts.yaml`.
+- **Workflows directory:** `./data/workflows/` symlinked to `../project-zun/workflows/`.
+- **Prompts file:** `./data/prompts.yaml` (gitignored). Copy from `data/prompts.example.yaml`.
+- **Bind address:** `0.0.0.0:8080` — accepts connections on all interfaces (LAN, Tailscale, loopback).
+- **Progress:** `GET /api/jobs/{id}` returns `progress: null`. WebSocket progress deferred.
+- **Image format:** outputs served as PNG, thumbnails as 400 px JPEG.
 
 ---
 
@@ -159,11 +156,11 @@ Concretely:
 | HTTP client | `reqwest` with `rustls-tls` | Talks to ComfyUI's HTTP API (plain HTTP on localhost; rustls reserved for future HTTPS calls) |
 | Database | `sqlx` with SQLite, `runtime-tokio` | Compile-time checked queries, async; no TLS needed for local SQLite |
 | TLS (server, later) | `axum-server` + `tokio-rustls` | Terminates HTTPS for Tailscale cert |
-| Serialization | `serde` + `serde_json` + `serde_yaml` | Standard |
+| Serialization | `serde` + `serde_json` + `serde_yaml_ng` | Standard (serde_yaml is deprecated; _ng is the maintained fork) |
 | Image processing | `image` crate | Thumbnail generation (pure Rust) |
 | Logging | `tracing` + `tracing-subscriber` | Structured logs, integrates with axum |
 | Middleware | `tower-http` | CORS, limits, tracing, auth helpers |
-| Config | plain `toml` + env | Small binary, no overkill config system |
+| Config | `toml` crate + serde | Single `config.toml`, no env vars except `RUST_LOG` |
 | UUID generation | `uuid` with `v4` feature | Job IDs |
 | Testing | built-in `cargo test` | Integration tests via `tower::ServiceExt::oneshot` |
 
@@ -185,7 +182,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "str
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "macros", "migrate", "chrono"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde_yaml = "0.9"
+serde_yaml_ng = "0.10"
 image = "0.25"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -217,50 +214,23 @@ Version numbers are a snapshot — bump to current stable at project start.
 
 ### Threat model
 
-- Single-user personal service behind Tailscale
-- Primary threat: a device on the tailnet other than the developer's phone attempts to hit the API
-- Secondary threat: malformed uploads causing server crashes or disk exhaustion
+- Single-user personal service, reachable only on home LAN or Tailscale
+- Primary threat: malformed uploads causing crashes or disk exhaustion
+- Non-threat: public internet exposure (never exposed)
 
 ### Layers
 
-1. **Tailscale network boundary.** Server is unreachable from the public internet. Only devices explicitly added to the tailnet can route packets to it.
-2. **Bind to tailnet interface only.** `axum` listens on the Tailscale IP (e.g., `100.x.x.x:8443`), not `0.0.0.0`. Even if a firewall rule goes wrong, the service isn't exposed on LAN.
-3. **TLS via `tailscale cert` (belt-and-suspenders, optional).** Tailscale's WireGuard tunnel already encrypts every packet end-to-end between your phone and the server, so plain HTTP over the tailnet is not cleartext over the wire. TLS on top still buys you: (a) the browser/Android app doesn't have to special-case an http:// URL, (b) defense-in-depth if you ever route non-tailnet traffic here by accident. For v1 dev we run plain HTTP on `127.0.0.1` and defer TLS to milestone 7.
-4. **Bearer token middleware.** Every request (except `/api/health`) requires `Authorization: Bearer <token>`. Token is a long random string (32+ bytes hex).
-5. **Upload size and type limits.** Multipart uploads capped at 20 MB, content-type validated as `image/*`, decoded with `image` crate before acceptance (rejects corrupt/malicious payloads).
-
-### Token handling
-
-- **Token lives in an env var (`ZUN_TOKEN`), not in a TOML file.** The systemd unit loads it from a separate, mode-600 EnvironmentFile.
-- **Token is compared in constant time** (`subtle::ConstantTimeEq`) to prevent timing side channels, even though realistic attacks are implausible here.
-- **Never log the token.** Tracing middleware must redact or omit the `Authorization` header.
-
-### Systemd hardening
-
-The systemd unit for `zun-server.service` should include basic sandboxing:
-
-```ini
-[Service]
-User=zun
-Group=zun
-EnvironmentFile=/etc/zun/env        # mode 600, contains ZUN_TOKEN
-WorkingDirectory=/srv/zun
-ExecStart=/usr/local/bin/zun-server
-Restart=on-failure
-NoNewPrivileges=true
-ProtectSystem=strict
-ProtectHome=true
-PrivateTmp=true
-ReadWritePaths=/srv/zun
-```
-
-The `zun` user should own `/srv/zun/` and nothing else. ComfyUI (from project-zun, run under the developer's user via `just serve`) communicates with this service only via HTTP on `127.0.0.1:8188`.
+1. **Network boundary.** On Tailscale, only enrolled devices can reach the server. On home LAN, only devices on the local network. The server is never exposed to the public internet.
+2. **Plain HTTP.** Tailscale's WireGuard tunnel encrypts all traffic end-to-end, so HTTP over Tailscale is not cleartext. On LAN, traffic never leaves the router. TLS is not implemented — the operational burden (cert rotation every 90 days) outweighs the benefit for a personal single-user app.
+3. **Bearer token middleware.** Every request (except `/api/health`) requires `Authorization: Bearer <token>`. Token lives in `config.toml` (mode 600, gitignored).
+4. **Token compared in constant time** (`subtle::ConstantTimeEq`) to prevent timing side channels.
+5. **Upload size and type limits.** Multipart uploads capped at 20 MB, content-type validated as `image/jpeg` or `image/png`, decoded with `image` crate before acceptance.
+6. **Authorization header redacted** from all trace logs via `tower-http::SetSensitiveRequestHeadersLayer`.
 
 ### What NOT to do
 
-- Do not implement custom auth schemes — just bearer token.
 - Do not expose ComfyUI's HTTP API through this server beyond the narrow subset needed.
-- Do not serve static files from `/srv/zun/outputs/` via `ServeDir` without auth. Always route through an authenticated handler.
+- Do not serve image files via `ServeDir` without auth — always route through an authenticated handler.
 - Do not log request bodies containing image data.
 
 ---
@@ -1200,36 +1170,27 @@ Landed in two chunks ordered by client priority (M6a first to unblock the Androi
 
 **Done when:** can list past jobs, fetch thumb/input/result, delete them — all satisfied. 61/61 tests pass.
 
-### Milestone 7 — Tailscale and TLS
+### Milestone 7 — TLS ✗ (deliberately skipped)
 
-- [ ] Install Tailscale on server: `tailscale up`
-- [ ] Generate cert: `tailscale cert your-server.your-tailnet.ts.net`
-- [ ] Configure `axum` with `axum-server` + rustls to serve HTTPS
-- [ ] Bind to the Tailscale IP (`100.x.x.x`) not `0.0.0.0`
-- [ ] Verify from another device on the tailnet: `curl https://your-server.your-tailnet.ts.net/api/health`
-
-**Done when:** HTTPS works from your phone over Tailscale.
+Decided against TLS. Tailscale's WireGuard tunnel encrypts all traffic end-to-end. Managing a cert (90-day Tailscale cert rotation) is operational overhead with no meaningful security gain for a single-user personal app. Server binds `0.0.0.0:8080` and works on both LAN and Tailscale simultaneously.
 
 ### Milestone 8 — Systemd deployment
 
 - [ ] Write `deploy/zun-server.service` unit
-- [ ] Create `zun` system user, `/srv/zun/` directory
-- [ ] Create `/etc/zun/env` with `ZUN_TOKEN=...`, mode 600
-- [ ] `cargo build --release`, copy binary to `/usr/local/bin/zun-server`
+- [ ] `cargo build --release`, copy binary and `config.toml` to server
 - [ ] `systemctl enable --now zun-server`
 - [ ] Verify logs: `journalctl -u zun-server -f`
 
-**Done when:** service starts on boot, survives reboots, logs flow correctly.
+**Done when:** service starts on boot and survives reboots.
 
 ### Milestone 9 — Polish
 
-- [ ] Per-job timeout (5 minutes default)
-- [ ] Startup reset of orphaned `running` jobs
-- [ ] Graceful shutdown (finish current job, don't accept new requests)
-- [ ] Cleanup task for old jobs (opt-in via config)
-- [ ] Metrics/health endpoints (e.g., `/api/health` returns queue depth)
+- [ ] FLUX.1 Fill / LoRA workflow support (placeholders exist in `workflow.rs`)
+- [ ] WebSocket progress reporting (ComfyUI emits real-time progress events)
+- [ ] Nightly cleanup task (opt-in via config, deletes jobs older than N days)
+- [ ] Worker liveness in `/api/health` (detect silent worker death)
 
-**Done when:** server feels production-solid for personal use.
+**Done when:** feels complete for daily use.
 
 ---
 
@@ -1237,7 +1198,7 @@ Landed in two chunks ordered by client priority (M6a first to unblock the Androi
 
 ### Level 1 — curl scripts
 
-Maintain `scripts/test.sh` as the primary end-to-end smoke test. Run after every significant change.
+Reference end-to-end smoke script (not committed to the repo; useful for manual sanity checks against a running server). The committed test suite is the Level 2 Rust integration tests below.
 
 ```bash
 #!/usr/bin/env bash
@@ -1590,7 +1551,7 @@ Claude can't talk to your actual ComfyUI instance. For Milestone 5, use a wiremo
 - SQLite only, no Postgres
 - Single binary, not microservices
 - Pure-Rust dep tree — rustls everywhere, no OpenSSL, no `pkg-config` deps
-- Bearer token only, no OAuth/JWT/sessions
+- Bearer token only, no OAuth/JWT/sessions — network boundary (Tailscale/LAN) is the primary security layer; no TLS (deliberate decision, see M7)
 - ComfyUI as a separate process (from project-zun, launched via `just serve`), never in-process ML
 - Multiple workflow families supported, primary v1 target is `flux2_klein_edit`
 - Workflow templates are opaque; substitution is string-placeholder, not node-ID patching

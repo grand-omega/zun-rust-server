@@ -15,7 +15,9 @@ use std::time::Duration;
 use sqlx::SqlitePool;
 use tokio::sync::{mpsc, watch};
 
-use crate::{AppState, comfy::ComfyClient, comfy::HistoryEntry, workflow};
+use crate::{
+    AppState, comfy::ComfyClient, comfy::HistoryEntry, prompts::CUSTOM_PROMPT_ID, workflow,
+};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(1000);
 const IDLE_TICK: Duration = Duration::from_secs(30);
@@ -99,11 +101,12 @@ struct QueuedJob {
     id: String,
     prompt_id: String,
     input_path: String,
+    custom_prompt: Option<String>,
 }
 
 async fn fetch_oldest_queued(db: &SqlitePool) -> anyhow::Result<Option<QueuedJob>> {
     let row = sqlx::query_as::<_, QueuedJob>(
-        "SELECT id, prompt_id, input_path FROM jobs \
+        "SELECT id, prompt_id, input_path, custom_prompt FROM jobs \
          WHERE status = 'queued' ORDER BY created_at ASC LIMIT 1",
     )
     .fetch_optional(db)
@@ -215,7 +218,14 @@ async fn process_job(state: &AppState, job: &QueuedJob) -> anyhow::Result<()> {
     let stored_name = state.comfy.upload_image(input_bytes, &upload_name).await?;
 
     // Patch workflow and submit.
-    let patched = workflow::build_edit_workflow(template, &prompt.text, &stored_name, &job.id);
+    let prompt_text = if job.prompt_id == CUSTOM_PROMPT_ID {
+        job.custom_prompt.as_deref().ok_or_else(|| {
+            anyhow::anyhow!("__custom__ job {} is missing custom_prompt text", job.id)
+        })?
+    } else {
+        &prompt.text
+    };
+    let patched = workflow::build_edit_workflow(template, prompt_text, &stored_name, &job.id);
     let comfy_prompt_id = state.comfy.submit_prompt(&patched).await?;
     update_comfy_prompt_id(&state.db, &job.id, &comfy_prompt_id).await?;
     tracing::info!(job_id = %job.id, comfy_prompt_id = %comfy_prompt_id, "submitted to comfyui");

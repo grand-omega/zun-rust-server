@@ -42,7 +42,8 @@ async fn list_prompts_returns_public_fields_only() {
 
     let body = body_json(resp).await;
     let items = body.as_array().unwrap();
-    assert_eq!(items.len(), 2);
+    // 2 from prompts.yaml + 1 synthetic __custom__ entry
+    assert_eq!(items.len(), 3);
 
     for item in items {
         assert!(item.get("id").is_some());
@@ -70,7 +71,7 @@ async fn list_prompts_requires_auth() {
 }
 
 #[tokio::test]
-async fn submit_valid_job_returns_201_and_job_id() {
+async fn submit_valid_job_returns_202_with_location_and_job_id() {
     let app = common::test_app().await;
     let router = app.router.clone();
     let (ct, body) =
@@ -81,10 +82,18 @@ async fn submit_valid_job_returns_201_and_job_id() {
         .oneshot(submit_request(&ct, body))
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::CREATED);
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    let location = resp
+        .headers()
+        .get("location")
+        .expect("Location header present")
+        .to_str()
+        .unwrap()
+        .to_string();
     let created = body_json(resp).await;
     let job_id = created["job_id"].as_str().unwrap().to_string();
     assert_eq!(job_id.len(), 36);
+    assert_eq!(location, format!("/api/jobs/{job_id}"));
 
     // Input file was written to the tempdir.
     let expected = app._tempdir.path().join(format!("inputs/{job_id}.jpg"));
