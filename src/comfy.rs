@@ -321,11 +321,7 @@ pub async fn await_completion(ws: &mut ComfyWs, prompt_id: &str) -> anyhow::Resu
             continue;
         }
         match v["type"].as_str() {
-            Some("executing") => {
-                if v["data"]["node"].is_null() {
-                    return Ok(());
-                }
-            }
+            Some("executing") if v["data"]["node"].is_null() => return Ok(()),
             Some("execution_error") => {
                 let details = v["data"].to_string();
                 anyhow::bail!("comfyui execution_error: {details}");
