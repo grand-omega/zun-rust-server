@@ -125,14 +125,21 @@ async fn reset_running_jobs(db: &SqlitePool) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn mark_running(db: &SqlitePool, job_id: &str) -> anyhow::Result<()> {
+/// Atomically claim a queued job. Returns `Ok(true)` if we transitioned
+/// queued→running, `Ok(false)` if the row is no longer queued (someone
+/// cancelled/deleted between fetch and claim). Caller must abort processing
+/// when this returns false.
+async fn mark_running(db: &SqlitePool, job_id: &str) -> anyhow::Result<bool> {
     let now = chrono::Utc::now().timestamp();
-    sqlx::query("UPDATE jobs SET status = 'running', started_at = ? WHERE id = ?")
-        .bind(now)
-        .bind(job_id)
-        .execute(db)
-        .await?;
-    Ok(())
+    let res = sqlx::query(
+        "UPDATE jobs SET status = 'running', started_at = ? \
+         WHERE id = ? AND status = 'queued'",
+    )
+    .bind(now)
+    .bind(job_id)
+    .execute(db)
+    .await?;
+    Ok(res.rows_affected() == 1)
 }
 
 async fn update_comfy_prompt_id(
@@ -148,17 +155,20 @@ async fn update_comfy_prompt_id(
     Ok(())
 }
 
+/// Transition running→done. Returns `Ok(false)` if the row is no longer in
+/// `running` (e.g. user cancelled while ComfyUI was busy); caller should
+/// then skip derived-image generation since the job is no longer "ours".
 async fn mark_done(
     db: &SqlitePool,
     job_id: &str,
     output_path: &str,
     width: Option<i64>,
     height: Option<i64>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     let now = chrono::Utc::now().timestamp();
-    sqlx::query(
+    let res = sqlx::query(
         "UPDATE jobs SET status = 'done', output_path = ?, completed_at = ?, \
-         width = ?, height = ? WHERE id = ?",
+         width = ?, height = ? WHERE id = ? AND status = 'running'",
     )
     .bind(output_path)
     .bind(now)
@@ -167,7 +177,7 @@ async fn mark_done(
     .bind(job_id)
     .execute(db)
     .await?;
-    Ok(())
+    Ok(res.rows_affected() == 1)
 }
 
 async fn mark_failed(db: &SqlitePool, job_id: &str, error_message: &str) -> anyhow::Result<()> {
@@ -190,7 +200,19 @@ async fn mark_failed(db: &SqlitePool, job_id: &str, error_message: &str) -> anyh
 async fn process_job(state: &AppState, job: &QueuedJob) -> anyhow::Result<()> {
     let started_at = std::time::Instant::now();
     let user = UserId(job.user_id);
-    mark_running(&state.db, &job.id).await?;
+    if !mark_running(&state.db, &job.id).await? {
+        // Lost the queued→running race: the row is no longer queued (most
+        // likely cancelled or hard-deleted between fetch and now). Drop the
+        // job silently — there's nothing to do, and mark_failed would
+        // overwrite the new status.
+        tracing::info!(
+            target: "audit",
+            event = "job.skipped_not_queued",
+            job_id = %job.id,
+            user_id = job.user_id,
+        );
+        return Ok(());
+    }
     tracing::info!(
         target: "audit",
         event = "job.running",
@@ -315,7 +337,20 @@ async fn process_job(state: &AppState, job: &QueuedJob) -> anyhow::Result<()> {
         }
     };
 
-    mark_done(&state.db, &job.id, &rel_output, width, height).await?;
+    if !mark_done(&state.db, &job.id, &rel_output, width, height).await? {
+        // Lost the running→done race: someone (most likely the cancel
+        // handler) flipped the row out of `running` while ComfyUI was
+        // working. Skip the derived-image work and the audit-done event
+        // — the new status is the source of truth.
+        tracing::info!(
+            target: "audit",
+            event = "job.completion_discarded",
+            job_id = %job.id,
+            user_id = job.user_id,
+            "comfy completed but row no longer running; cancellation/delete won the race",
+        );
+        return Ok(());
+    }
 
     // Eager render of thumb + preview so the phone never pays for encode
     // latency on first view. Failures are logged inside the helper and

@@ -86,18 +86,23 @@ pub async fn run(state: &AppState, opts: PurgeOpts) -> anyhow::Result<PurgeRepor
     let input_cutoff = opts.now_seconds - opts.cache_ttl_seconds;
 
     // Soft-deleted jobs older than the grace period.
-    let stale_jobs: Vec<(String, Option<String>, Option<String>)> = sqlx::query_as(
-        "SELECT id, output_path, thumb_path FROM jobs \
+    type StaleJobRow = (String, Option<String>, Option<String>, Option<String>);
+    let stale_jobs: Vec<StaleJobRow> = sqlx::query_as(
+        "SELECT id, output_path, thumb_path, preview_path FROM jobs \
          WHERE deleted_at IS NOT NULL AND deleted_at < ?",
     )
     .bind(job_cutoff)
     .fetch_all(&state.db)
     .await?;
 
-    for (id, output_path, thumb_path) in stale_jobs {
-        for rel in [output_path.as_deref(), thumb_path.as_deref()]
-            .into_iter()
-            .flatten()
+    for (id, output_path, thumb_path, preview_path) in stale_jobs {
+        for rel in [
+            output_path.as_deref(),
+            thumb_path.as_deref(),
+            preview_path.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
         {
             let abs = state.config.data_dir.join(rel);
             if opts.dry_run {

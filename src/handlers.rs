@@ -284,24 +284,45 @@ async fn resolve_input(
     let now = chrono::Utc::now().timestamp();
 
     // Look for an existing row for this (user, sha).
-    let existing: Option<(i64, Option<String>)> =
+    let mut existing: Option<(i64, Option<String>)> =
         sqlx::query_as("SELECT id, path FROM inputs WHERE user_id = ? AND sha256 = ?")
             .bind(user.0)
             .bind(&fields.input_sha256)
             .fetch_optional(&state.db)
             .await?;
 
-    match (existing, fields.upload.as_ref()) {
-        // Cache hit, file present: reuse.
-        (Some((id, Some(_path))), _) => {
+    // If we have a row that claims a path, verify the file is actually on
+    // disk. It might be gone for reasons outside our control (manual cleanup,
+    // partial restore, disk corruption). If missing, demote the row to
+    // NULL-path so the rest of this fn treats it as "needs upload".
+    if let Some((id, Some(path))) = existing.as_ref() {
+        let id_v = *id;
+        let abs = state.config.data_dir.join(path);
+        if tokio::fs::metadata(&abs).await.is_ok() {
             sqlx::query("UPDATE inputs SET last_used_at = ? WHERE id = ? AND user_id = ?")
                 .bind(now)
-                .bind(id)
+                .bind(id_v)
                 .bind(user.0)
                 .execute(&state.db)
                 .await?;
-            Ok(id)
+            return Ok(id_v);
         }
+        tracing::warn!(
+            input_id = id_v,
+            path = %abs.display(),
+            "cached input file missing on disk; clearing path",
+        );
+        sqlx::query("UPDATE inputs SET path = NULL WHERE id = ? AND user_id = ?")
+            .bind(id_v)
+            .bind(user.0)
+            .execute(&state.db)
+            .await?;
+        existing = Some((id_v, None));
+    }
+
+    match (existing, fields.upload.as_ref()) {
+        // Handled above.
+        (Some((_, Some(_))), _) => unreachable!(),
         // Hash-only request, no row OR row with NULL path → caller must re-upload.
         (existing_row, None) => Err(AppError::NeedUpload {
             input_id: existing_row.map(|(id, _)| id),

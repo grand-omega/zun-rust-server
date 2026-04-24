@@ -113,6 +113,55 @@ async fn submit_with_known_hash_via_json_skips_upload() {
 }
 
 #[tokio::test]
+async fn submit_json_with_known_hash_but_missing_file_returns_409_and_clears_path() {
+    // Ground truth: an inputs row claims to have a cached file, but the
+    // file is gone from disk (manual cleanup, partial restore, etc.).
+    // The submit handler must surface NeedUpload AND null out the stale
+    // path so subsequent hash-only submits also fail fast.
+    let mut app = common::test_app().await;
+    let prompt_id = seed_test_prompt(&mut app).await;
+    let img = b"orphan-bytes";
+    let sha = zun_rust_server::hash::sha256_hex(img);
+    let input_id = common::seed_input(&app.db, app._tempdir.path(), &sha, Some(img)).await;
+
+    // Delete the file out from under the row.
+    let abs = app
+        ._tempdir
+        .path()
+        .join(format!("users/1/cache/inputs/{sha}.jpg"));
+    std::fs::remove_file(&abs).expect("remove cached file");
+
+    let body = serde_json::json!({
+        "input_sha256": sha,
+        "prompt_id": prompt_id,
+    });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/v1/jobs")
+        .header("authorization", common::bearer(common::TEST_TOKEN))
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let resp = app.router.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    let body = body_json(resp).await;
+    assert_eq!(body["code"], "need_upload");
+    assert_eq!(body["input_id"], input_id);
+
+    // The handler should have cleared the stale path so the row reflects
+    // disk reality.
+    let path: Option<String> = sqlx::query_scalar("SELECT path FROM inputs WHERE id = ?")
+        .bind(input_id)
+        .fetch_one(&app.db)
+        .await
+        .unwrap();
+    assert!(
+        path.is_none(),
+        "expected NULL path after disk-miss; got {path:?}"
+    );
+}
+
+#[tokio::test]
 async fn submit_json_with_unknown_hash_returns_409_need_upload() {
     let mut app = common::test_app().await;
     let prompt_id = seed_test_prompt(&mut app).await;
