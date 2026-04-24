@@ -60,7 +60,7 @@ struct PromptsFile {
 pub fn load(path: &Path) -> anyhow::Result<HashMap<String, Prompt>> {
     let raw = std::fs::read_to_string(path)
         .map_err(|e| anyhow::anyhow!("read prompts file {}: {e}", path.display()))?;
-    let parsed: PromptsFile = serde_yaml::from_str(&raw)?;
+    let parsed: PromptsFile = serde_yaml_ng::from_str(&raw)?;
     let mut map = HashMap::with_capacity(parsed.prompts.len());
     for p in parsed.prompts {
         if map.contains_key(&p.id) {
