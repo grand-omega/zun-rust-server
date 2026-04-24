@@ -42,7 +42,8 @@ async fn list_prompts_returns_public_fields_only() {
 
     let body = body_json(resp).await;
     let items = body.as_array().unwrap();
-    assert_eq!(items.len(), 2);
+    // 2 from prompts.yaml + 1 synthetic __custom__ entry
+    assert_eq!(items.len(), 3);
 
     for item in items {
         assert!(item.get("id").is_some());

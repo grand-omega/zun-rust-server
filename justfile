@@ -44,11 +44,3 @@ setup:
         echo "wrote data/prompts.yaml — edit with your real prompts."
     fi
     echo "next: just serve-dev"
-
-# Run in development mode: debug build.
-serve-dev:
-    cargo run
-
-# Run in production mode: release build.
-serve-prod:
-    cargo run --release

@@ -6,6 +6,10 @@ use serde::{Deserialize, Serialize};
 /// per-prompt in prompts.yaml for slower workflows (e.g. FLUX.1 Fill).
 pub const DEFAULT_TIMEOUT_SECONDS: u64 = 60;
 
+/// Reserved prompt ID for free-text custom prompts. Injected at startup;
+/// never appears in prompts.yaml.
+pub const CUSTOM_PROMPT_ID: &str = "__custom__";
+
 fn default_timeout_seconds() -> u64 {
     DEFAULT_TIMEOUT_SECONDS
 }
@@ -65,4 +69,20 @@ pub fn load(path: &Path) -> anyhow::Result<HashMap<String, Prompt>> {
         map.insert(p.id.clone(), p);
     }
     Ok(map)
+}
+
+/// Inject the synthetic `__custom__` entry so clients can submit free-text
+/// prompts. `workflow` is the stem of the workflow template to use (must
+/// exist in the workflows directory). Idempotent — no-op if already present.
+pub fn inject_custom(prompts: &mut HashMap<String, Prompt>, workflow: String) {
+    prompts
+        .entry(CUSTOM_PROMPT_ID.to_string())
+        .or_insert_with(|| Prompt {
+            id: CUSTOM_PROMPT_ID.to_string(),
+            label: "Custom".to_string(),
+            description: Some("Enter your own prompt text".to_string()),
+            text: String::new(),
+            workflow,
+            timeout_seconds: DEFAULT_TIMEOUT_SECONDS,
+        });
 }

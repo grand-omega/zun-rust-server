@@ -57,7 +57,8 @@ pub async fn test_app_with_comfy(comfy_url: &str) -> TestApp {
 
     let prompts_path = tempdir.path().join("prompts.yaml");
     std::fs::write(&prompts_path, TEST_PROMPTS_YAML).expect("write test prompts");
-    let prompts_map = prompts::load(&prompts_path).expect("parse test prompts");
+    let mut prompts_map = prompts::load(&prompts_path).expect("parse test prompts");
+    prompts::inject_custom(&mut prompts_map, "flux2_klein_edit".to_string());
 
     let config = Config {
         data_dir: tempdir.path().to_path_buf(),
@@ -65,6 +66,7 @@ pub async fn test_app_with_comfy(comfy_url: &str) -> TestApp {
         token: TEST_TOKEN.to_string(),
         comfy_url: comfy_url.to_string(),
         log_format: zun_rust_server::config::LogFormat::Auto,
+        custom_prompt_workflow: "flux2_klein_edit".to_string(),
     };
     let comfy = ComfyClient::new(comfy_url).expect("comfy client");
     let (worker_tx, worker_rx) = mpsc::channel::<()>(1);
@@ -191,6 +193,35 @@ pub fn multipart_image_job(
     body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
     body.extend_from_slice(b"Content-Disposition: form-data; name=\"prompt_id\"\r\n\r\n");
     body.extend_from_slice(prompt_id.as_bytes());
+    body.extend_from_slice(b"\r\n");
+    body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+    (format!("multipart/form-data; boundary={boundary}"), body)
+}
+
+/// Like `multipart_image_job` but includes a `custom_prompt` text field.
+#[allow(dead_code)]
+pub fn multipart_image_job_with_custom(
+    image_bytes: &[u8],
+    content_type: &str,
+    prompt_id: &str,
+    custom_prompt: &str,
+) -> (String, Vec<u8>) {
+    let boundary = "----ZunTestBoundary9XyZ";
+    let mut body: Vec<u8> = Vec::new();
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(
+        b"Content-Disposition: form-data; name=\"image\"; filename=\"t.bin\"\r\n",
+    );
+    body.extend_from_slice(format!("Content-Type: {content_type}\r\n\r\n").as_bytes());
+    body.extend_from_slice(image_bytes);
+    body.extend_from_slice(b"\r\n");
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(b"Content-Disposition: form-data; name=\"prompt_id\"\r\n\r\n");
+    body.extend_from_slice(prompt_id.as_bytes());
+    body.extend_from_slice(b"\r\n");
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(b"Content-Disposition: form-data; name=\"custom_prompt\"\r\n\r\n");
+    body.extend_from_slice(custom_prompt.as_bytes());
     body.extend_from_slice(b"\r\n");
     body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
     (format!("multipart/form-data; boundary={boundary}"), body)

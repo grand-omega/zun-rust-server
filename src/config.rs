@@ -13,6 +13,14 @@ pub struct Config {
     pub data_dir: PathBuf,
     #[serde(default)]
     pub log_format: LogFormat,
+    /// Workflow stem used when prompt_id is "__custom__". Must match a file
+    /// in the workflows directory (without the .json extension).
+    #[serde(default = "default_custom_prompt_workflow")]
+    pub custom_prompt_workflow: String,
+}
+
+fn default_custom_prompt_workflow() -> String {
+    "flux2_klein_edit".into()
 }
 
 fn default_bind() -> String {
