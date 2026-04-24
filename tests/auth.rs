@@ -24,11 +24,7 @@ async fn health_is_public_no_auth_needed() {
 #[tokio::test]
 async fn authed_route_rejects_missing_header() {
     let app = common::test_app().await;
-    let resp = app
-        .router
-        .oneshot(req("/api/debug/jobs", None))
-        .await
-        .unwrap();
+    let resp = app.router.oneshot(req("/api/prompts", None)).await.unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
@@ -38,7 +34,7 @@ async fn authed_route_rejects_wrong_token() {
     let bad = common::bearer("wrong-token-0123456789abcdef");
     let resp = app
         .router
-        .oneshot(req("/api/debug/jobs", Some(&bad)))
+        .oneshot(req("/api/prompts", Some(&bad)))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
@@ -50,7 +46,7 @@ async fn authed_route_rejects_missing_bearer_prefix() {
     // Raw token without "Bearer " prefix.
     let resp = app
         .router
-        .oneshot(req("/api/debug/jobs", Some(common::TEST_TOKEN)))
+        .oneshot(req("/api/prompts", Some(common::TEST_TOKEN)))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
@@ -62,7 +58,7 @@ async fn authed_route_accepts_correct_token() {
     let good = common::bearer(common::TEST_TOKEN);
     let resp = app
         .router
-        .oneshot(req("/api/debug/jobs", Some(&good)))
+        .oneshot(req("/api/prompts", Some(&good)))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);

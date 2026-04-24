@@ -17,7 +17,7 @@ Prerequisites:
 ```bash
 cp config.example.toml config.toml   # then edit: set token, bind address
 cp data/prompts.example.yaml data/prompts.yaml   # then edit with your real prompts
-just serve-dev
+cargo run
 ```
 
 Hit `/api/health` to verify:
@@ -44,8 +44,8 @@ All config lives in `config.toml` (gitignored). Copy from `config.example.toml`:
 ## Developing
 
 ```bash
-just serve-dev     # debug build
-just serve-prod    # release build
+cargo run              # debug build
+cargo run --release    # release build
 ```
 
 Commit gate (pre-commit hook):

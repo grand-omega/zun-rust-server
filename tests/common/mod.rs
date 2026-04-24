@@ -114,6 +114,21 @@ pub fn spawn_worker(app: &mut TestApp) -> tokio::task::JoinHandle<()> {
     worker::spawn(app.state.clone(), rx, shutdown_rx)
 }
 
+/// Like `spawn_worker`, but returns the shutdown sender so the test can
+/// signal shutdown explicitly and await the worker's exit.
+#[allow(dead_code)]
+pub fn spawn_worker_with_shutdown(
+    app: &mut TestApp,
+) -> (tokio::task::JoinHandle<()>, watch::Sender<bool>) {
+    let rx = app
+        .worker_rx
+        .take()
+        .expect("worker already spawned for this TestApp");
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let handle = worker::spawn(app.state.clone(), rx, shutdown_rx);
+    (handle, shutdown_tx)
+}
+
 /// Seed a workflow template into AppState (tests bypass the filesystem
 /// loader). Takes &mut AppState so we can rebuild the Arc<HashMap>.
 #[allow(dead_code)]

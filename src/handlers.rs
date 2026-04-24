@@ -1,58 +1,16 @@
 use axum::{
     Json,
     extract::{Multipart, Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, HeaderValue, StatusCode, header},
+    response::{IntoResponse, Response},
 };
 use serde::Deserialize;
 use serde_json::json;
 
 use crate::{
-    AppError, AppState,
+    AppError, AppState, MAX_UPLOAD_BYTES,
     prompts::{CUSTOM_PROMPT_ID, PromptDto},
 };
-
-// ---------- debug (M2) ----------
-
-pub async fn debug_create_job(
-    State(state): State<AppState>,
-) -> Result<Json<serde_json::Value>, AppError> {
-    let id = uuid::Uuid::new_v4().to_string();
-    let now = chrono::Utc::now().timestamp();
-    sqlx::query(
-        "INSERT INTO jobs (id, status, prompt_id, input_path, created_at) \
-         VALUES (?, 'queued', 'debug', 'debug-input', ?)",
-    )
-    .bind(&id)
-    .bind(now)
-    .execute(&state.db)
-    .await?;
-
-    Ok(Json(json!({ "id": id })))
-}
-
-pub async fn debug_list_jobs(
-    State(state): State<AppState>,
-) -> Result<Json<serde_json::Value>, AppError> {
-    let rows: Vec<(String, String, String, i64)> = sqlx::query_as(
-        "SELECT id, status, prompt_id, created_at FROM jobs ORDER BY created_at DESC LIMIT 50",
-    )
-    .fetch_all(&state.db)
-    .await?;
-
-    let items: Vec<_> = rows
-        .into_iter()
-        .map(|(id, status, prompt_id, created_at)| {
-            json!({
-                "id": id,
-                "status": status,
-                "prompt_id": prompt_id,
-                "created_at": created_at,
-            })
-        })
-        .collect();
-
-    Ok(Json(json!(items)))
-}
 
 // ---------- prompts (M4) ----------
 
@@ -67,7 +25,11 @@ pub async fn list_prompts(State(state): State<AppState>) -> Json<Vec<PromptDto>>
 pub async fn submit_job(
     State(state): State<AppState>,
     mut multipart: Multipart,
-) -> Result<(StatusCode, Json<serde_json::Value>), AppError> {
+) -> Result<(StatusCode, HeaderMap, Json<serde_json::Value>), AppError> {
+    let max_mb = MAX_UPLOAD_BYTES / (1024 * 1024);
+    let image_field_hint =
+        format!("multipart field 'image', image/jpeg or image/png, max {max_mb} MB");
+
     let mut image_bytes: Option<Vec<u8>> = None;
     let mut image_ext: Option<&'static str> = None;
     let mut prompt_id: Option<String> = None;
@@ -82,7 +44,7 @@ pub async fn submit_job(
                     "image/png" => "png",
                     other => {
                         return Err(AppError::BadRequest(format!(
-                            "unsupported image content-type: {other}"
+                            "unsupported image content-type '{other}' (expected image/jpeg or image/png)"
                         )));
                     }
                 });
@@ -98,12 +60,18 @@ pub async fn submit_job(
         }
     }
 
-    let image_bytes =
-        image_bytes.ok_or_else(|| AppError::BadRequest("image field is required".into()))?;
-    let image_ext =
-        image_ext.ok_or_else(|| AppError::BadRequest("image field is required".into()))?;
-    let prompt_id =
-        prompt_id.ok_or_else(|| AppError::BadRequest("prompt_id field is required".into()))?;
+    let image_bytes = image_bytes.ok_or_else(|| {
+        AppError::BadRequest(format!("image field is required ({image_field_hint})"))
+    })?;
+    let image_ext = image_ext.ok_or_else(|| {
+        AppError::BadRequest(format!("image field is required ({image_field_hint})"))
+    })?;
+    let prompt_id = prompt_id.ok_or_else(|| {
+        AppError::BadRequest(
+            "prompt_id field is required (multipart field 'prompt_id'; see GET /api/prompts)"
+                .into(),
+        )
+    })?;
 
     if !state.prompts.contains_key(&prompt_id) {
         return Err(AppError::UnknownPrompt(prompt_id));
@@ -115,7 +83,9 @@ pub async fn submit_job(
         let text = custom_prompt
             .filter(|s| !s.trim().is_empty())
             .ok_or_else(|| {
-                AppError::BadRequest("custom_prompt is required for __custom__".into())
+                AppError::BadRequest(
+                    "custom_prompt is required (non-empty) when prompt_id=__custom__".into(),
+                )
             })?;
         Some(text)
     } else {
@@ -156,7 +126,17 @@ pub async fn submit_job(
         input_bytes = image_bytes.len(),
     );
 
-    Ok((StatusCode::CREATED, Json(json!({ "job_id": job_id }))))
+    // 202 Accepted: the job is queued, not yet complete. Location points at
+    // the canonical poll URL for the newly created resource.
+    let mut headers = HeaderMap::new();
+    if let Ok(loc) = HeaderValue::from_str(&format!("/api/jobs/{job_id}")) {
+        headers.insert(header::LOCATION, loc);
+    }
+    Ok((
+        StatusCode::ACCEPTED,
+        headers,
+        Json(json!({ "job_id": job_id })),
+    ))
 }
 
 #[derive(Deserialize, Default)]
@@ -178,7 +158,7 @@ struct JobSummaryRow {
 pub async fn list_jobs(
     State(state): State<AppState>,
     Query(q): Query<ListQuery>,
-) -> Result<Json<serde_json::Value>, AppError> {
+) -> Result<Response, AppError> {
     let status = q.status.as_deref().unwrap_or("done");
     let limit = q.limit.unwrap_or(30).clamp(1, 100);
 
@@ -205,6 +185,12 @@ pub async fn list_jobs(
         .await?
     };
 
+    // If the page is full, the caller may want more. The oldest row's
+    // created_at is the cursor for the next page (rows are ordered DESC).
+    let next_before = (rows.len() as i64 == limit)
+        .then(|| rows.last().map(|r| r.created_at))
+        .flatten();
+
     let items: Vec<_> = rows
         .into_iter()
         .map(|row| {
@@ -224,7 +210,18 @@ pub async fn list_jobs(
         })
         .collect();
 
-    Ok(Json(json!(items)))
+    let mut resp = Json(json!(items)).into_response();
+    if let Some(before) = next_before {
+        let link =
+            format!("</api/jobs?status={status}&limit={limit}&before={before}>; rel=\"next\"");
+        // from_str rejects CR/LF and other control bytes. If `status` is
+        // malformed enough to invalidate the header, skip emission rather
+        // than fail the whole request.
+        if let Ok(v) = HeaderValue::from_str(&link) {
+            resp.headers_mut().insert(header::LINK, v);
+        }
+    }
+    Ok(resp)
 }
 
 #[derive(sqlx::FromRow)]

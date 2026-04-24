@@ -34,7 +34,7 @@ use tower_http::{
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Multipart upload cap for POST /api/jobs.
-const MAX_UPLOAD_BYTES: usize = 20 * 1024 * 1024;
+pub(crate) const MAX_UPLOAD_BYTES: usize = 20 * 1024 * 1024;
 
 pub fn router(state: AppState) -> Router {
     let authed = Router::new()
@@ -52,8 +52,6 @@ pub fn router(state: AppState) -> Router {
         .route("/api/jobs/{id}/input", get(images::get_input))
         .route("/api/jobs/{id}/result", get(images::get_result))
         .route("/api/jobs/{id}/thumb", get(images::get_thumb))
-        .route("/api/debug/job", post(handlers::debug_create_job))
-        .route("/api/debug/jobs", get(handlers::debug_list_jobs))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_bearer,

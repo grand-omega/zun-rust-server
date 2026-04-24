@@ -2,7 +2,7 @@
 #
 # First-time setup:
 #   cp config.example.toml config.toml   # then edit: set token, bind address
-#   just serve-dev
+#   cargo run
 
 # Show available recipes.
 default:
@@ -43,4 +43,4 @@ setup:
         cp data/prompts.example.yaml data/prompts.yaml
         echo "wrote data/prompts.yaml — edit with your real prompts."
     fi
-    echo "next: just serve-dev"
+    echo "next: cargo run"

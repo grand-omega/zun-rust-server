@@ -156,7 +156,7 @@ Concretely:
 | HTTP client | `reqwest` with `rustls-tls` | Talks to ComfyUI's HTTP API (plain HTTP on localhost; rustls reserved for future HTTPS calls) |
 | Database | `sqlx` with SQLite, `runtime-tokio` | Compile-time checked queries, async; no TLS needed for local SQLite |
 | TLS (server, later) | `axum-server` + `tokio-rustls` | Terminates HTTPS for Tailscale cert |
-| Serialization | `serde` + `serde_json` + `serde_yaml` | Standard |
+| Serialization | `serde` + `serde_json` + `serde_yaml_ng` | Standard (serde_yaml is deprecated; _ng is the maintained fork) |
 | Image processing | `image` crate | Thumbnail generation (pure Rust) |
 | Logging | `tracing` + `tracing-subscriber` | Structured logs, integrates with axum |
 | Middleware | `tower-http` | CORS, limits, tracing, auth helpers |
@@ -182,7 +182,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "str
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "macros", "migrate", "chrono"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde_yaml = "0.9"
+serde_yaml_ng = "0.10"
 image = "0.25"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -1198,7 +1198,7 @@ Decided against TLS. Tailscale's WireGuard tunnel encrypts all traffic end-to-en
 
 ### Level 1 — curl scripts
 
-Maintain `scripts/test.sh` as the primary end-to-end smoke test. Run after every significant change.
+Reference end-to-end smoke script (not committed to the repo; useful for manual sanity checks against a running server). The committed test suite is the Level 2 Rust integration tests below.
 
 ```bash
 #!/usr/bin/env bash

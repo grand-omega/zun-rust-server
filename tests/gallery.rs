@@ -245,6 +245,51 @@ async fn list_before_cursor_paginates() {
 }
 
 #[tokio::test]
+async fn list_emits_link_header_when_page_is_full() {
+    let app = common::test_app().await;
+    for i in 0..5 {
+        let id = format!("j{i}");
+        common::seed_job(
+            &app.db,
+            &id,
+            "done",
+            "test_prompt",
+            1_700_000_000 + i,
+            Some(1_700_000_100),
+        )
+        .await;
+    }
+
+    // limit=3 over 5 rows → full page → Link header present, pointing at
+    // the oldest row's created_at.
+    let resp = app
+        .router
+        .clone()
+        .oneshot(authed("GET", "/api/jobs?limit=3"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let link = resp
+        .headers()
+        .get("link")
+        .expect("Link header on full page")
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(link.contains("rel=\"next\""), "got: {link}");
+    assert!(link.contains("before=1700000002"), "got: {link}");
+    assert!(link.contains("limit=3"), "got: {link}");
+
+    // limit=10 over 5 rows → partial page → no Link header.
+    let resp = app
+        .router
+        .oneshot(authed("GET", "/api/jobs?limit=10"))
+        .await
+        .unwrap();
+    assert!(resp.headers().get("link").is_none());
+}
+
+#[tokio::test]
 async fn list_limit_is_clamped_to_100() {
     let app = common::test_app().await;
     let resp = app
@@ -308,7 +353,7 @@ async fn delete_after_submit_removes_row_and_file() {
         )
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::CREATED);
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
     let created = body_json(resp).await;
     let job_id = created["job_id"].as_str().unwrap().to_string();
     let input_path = tmpdir_path.join(format!("inputs/{job_id}.jpg"));
