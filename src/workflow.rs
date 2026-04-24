@@ -14,6 +14,9 @@ use serde_json::Value;
 pub const PROMPT: &str = "PROMPT_PLACEHOLDER";
 pub const INPUT_IMAGE: &str = "INPUT_IMAGE_PLACEHOLDER";
 pub const FILENAME_PREFIX: &str = "FILENAME_PREFIX_PLACEHOLDER";
+/// Per-job random seed. Substituted as a JSON number, not a string —
+/// see `patch_seed_placeholder` for the special-cased handling.
+pub const SEED: &str = "SEED_PLACEHOLDER";
 // The rest are defined for completeness; the server v1 only populates the
 // three above (klein_edit path). Fill / ref / LoRA paths come later.
 #[allow(dead_code)]
@@ -53,14 +56,16 @@ pub fn patch_placeholders(value: &mut Value, subs: &[(&str, &str)]) {
 }
 
 /// Build an edit-flow workflow (klein_edit / klein_ref_edit / fill_*).
-/// Supplies the three placeholders every edit workflow needs. Extra
-/// workflow-specific placeholders (mask prompt, reference image, lora) are
-/// the caller's responsibility via `patch_placeholders` directly.
+/// Supplies the four placeholders every edit workflow needs (prompt,
+/// input image, filename prefix, seed). Extra workflow-specific placeholders
+/// (mask prompt, reference image, lora) are the caller's responsibility via
+/// `patch_placeholders` directly.
 pub fn build_edit_workflow(
     template: &Value,
     prompt_text: &str,
     input_image_name: &str,
     job_id: &str,
+    seed: i64,
 ) -> Value {
     let mut out = template.clone();
     let prefix = format!("zun_{job_id}");
@@ -72,7 +77,33 @@ pub fn build_edit_workflow(
             (FILENAME_PREFIX, &prefix),
         ],
     );
+    patch_seed_placeholder(&mut out, seed);
     out
+}
+
+/// Substitute `"SEED_PLACEHOLDER"` (a string) with a JSON number.
+/// Handled separately because all other placeholders stay as strings;
+/// seed is a sampler integer.
+pub fn patch_seed_placeholder(value: &mut Value, seed: i64) {
+    fn walk(v: &mut Value, seed: i64) {
+        match v {
+            Value::String(s) if s == SEED => {
+                *v = Value::Number(serde_json::Number::from(seed));
+            }
+            Value::Array(arr) => {
+                for x in arr.iter_mut() {
+                    walk(x, seed);
+                }
+            }
+            Value::Object(obj) => {
+                for x in obj.values_mut() {
+                    walk(x, seed);
+                }
+            }
+            _ => {}
+        }
+    }
+    walk(value, seed);
 }
 
 /// Load every `*.json` in `dir` into a map keyed by file stem
@@ -166,25 +197,34 @@ mod tests {
 
     #[test]
     fn build_edit_workflow_patches_expected_fields() {
-        // Fixture mirrors the shape of flux2_klein_edit (CLIPTextEncode on
-        // some node with "text": PROMPT, LoadImage with "image": INPUT,
-        // SaveImage with "filename_prefix": FILENAME_PREFIX).
+        // Fixture mirrors the shape of flux2_klein_edit.
         let template = json!({
             "4": { "inputs": { "image": "INPUT_IMAGE_PLACEHOLDER" } },
             "9": { "inputs": { "text": "PROMPT_PLACEHOLDER" } },
+            "16": { "inputs": { "noise_seed": "SEED_PLACEHOLDER" } },
             "19": { "inputs": { "filename_prefix": "FILENAME_PREFIX_PLACEHOLDER" } }
         });
-        let built = build_edit_workflow(&template, "anime", "in.jpg", "abc-123");
+        let built = build_edit_workflow(&template, "anime", "in.jpg", "abc-123", 12345);
         assert_eq!(built["9"]["inputs"]["text"], "anime");
         assert_eq!(built["4"]["inputs"]["image"], "in.jpg");
         assert_eq!(built["19"]["inputs"]["filename_prefix"], "zun_abc-123");
+        assert_eq!(built["16"]["inputs"]["noise_seed"], 12345);
     }
 
     #[test]
     fn build_edit_workflow_does_not_touch_original() {
         let template = json!({ "9": { "inputs": { "text": "PROMPT_PLACEHOLDER" } } });
-        let _ = build_edit_workflow(&template, "x", "y.jpg", "j");
+        let _ = build_edit_workflow(&template, "x", "y.jpg", "j", 7);
         assert_eq!(template["9"]["inputs"]["text"], "PROMPT_PLACEHOLDER");
+    }
+
+    #[test]
+    fn seed_placeholder_becomes_json_number() {
+        let mut v = json!({ "noise_seed": "SEED_PLACEHOLDER", "other": "PROMPT_PLACEHOLDER" });
+        patch_seed_placeholder(&mut v, 42);
+        assert_eq!(v["noise_seed"], 42);
+        // Non-seed placeholders are untouched by patch_seed_placeholder.
+        assert_eq!(v["other"], "PROMPT_PLACEHOLDER");
     }
 
     #[test]

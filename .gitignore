@@ -1,11 +1,9 @@
 /target
 # Local config (contains token) — never committed.
 config.toml
-# Ignore everything under /data except:
-#   - the workflows symlink pointing at ../../project-zun/workflows
-#   - the committed prompts template (prompts.example.toml)
-# The real `data/prompts.toml` stays local-only — never committed.
+# Ignore everything under /data except the workflows symlink pointing at
+# ../../project-zun/workflows. v2 has no prompts.toml; user prompts live
+# in jobs.db (custom_prompts table) and seed bytes via `zun-admin seed-prompts`.
 /data/*
 !/data/workflows
-!/data/prompts.example.toml
 .claude

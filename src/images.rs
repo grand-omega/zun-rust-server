@@ -1,13 +1,11 @@
-//! Handlers that serve per-job images (input / result / thumb).
-//!
-//! All three go through the DB so we can (a) enforce auth via the normal
-//! middleware, (b) 404 before touching the filesystem for unknown jobs,
-//! and (c) 409 a result that hasn't completed yet. Thumbnails are
-//! lazily generated on first request and cached to `data/thumbs/`.
+//! Handlers that serve per-job result + thumbnail + preview images. Inputs
+//! are served via `inputs::get_input_file` (they live in the cache dir and
+//! are addressed by input_id, not job_id).
 
 use std::path::Path as FsPath;
 
 use axum::{
+    Extension,
     body::Body,
     extract::{Path, Request, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
@@ -15,143 +13,136 @@ use axum::{
 };
 use tokio_util::io::ReaderStream;
 
-use crate::{AppError, AppState};
+use crate::{
+    AppError, AppState,
+    derived_images::{self, PREVIEW_MAX_EDGE, THUMB_MAX_EDGE},
+    paths::subdir,
+    state::UserId,
+};
 
 const CACHE_HEADER: &str = "private, max-age=3600";
-const THUMB_SIDE: u32 = 400;
-
-/// Serve the original uploaded input.
-pub async fn get_input(
-    State(state): State<AppState>,
-    Path(job_id): Path<String>,
-    req: Request,
-) -> Result<Response, AppError> {
-    let (rel,): (String,) = sqlx::query_as("SELECT input_path FROM jobs WHERE id = ?")
-        .bind(&job_id)
-        .fetch_optional(&state.db)
-        .await?
-        .ok_or(AppError::NotFound)?;
-
-    let abs = state.config.data_dir.join(&rel);
-    serve_file(&abs, content_type_for(&rel), req.headers()).await
-}
 
 /// Serve the full-resolution output. 409 if the job hasn't finished yet.
 pub async fn get_result(
     State(state): State<AppState>,
+    Extension(user): Extension<UserId>,
     Path(job_id): Path<String>,
     req: Request,
 ) -> Result<Response, AppError> {
-    let row: (String, Option<String>) =
-        sqlx::query_as("SELECT status, output_path FROM jobs WHERE id = ?")
-            .bind(&job_id)
-            .fetch_optional(&state.db)
-            .await?
-            .ok_or(AppError::NotFound)?;
+    let row: (String, Option<String>) = sqlx::query_as(
+        "SELECT status, output_path FROM jobs \
+         WHERE id = ? AND user_id = ? AND deleted_at IS NULL",
+    )
+    .bind(&job_id)
+    .bind(user.0)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or(AppError::NotFound)?;
     let (status, output_path) = row;
     if status != "done" {
         return Err(AppError::NotReady);
     }
     let rel = output_path.ok_or(AppError::NotReady)?;
     let abs = state.config.data_dir.join(&rel);
-    serve_file(&abs, content_type_for(&rel), req.headers()).await
+    serve_file_with_ct(&abs, content_type_for(&rel), req.headers()).await
 }
 
-/// Serve a 400×400 max JPEG thumbnail. Generated on first request and
-/// cached to `data/thumbs/{job_id}.jpg`; `thumb_path` is also persisted on
-/// the row so subsequent reads skip the decode.
+/// 400px JPEG. Fast path: cached file. Slow path: lazy generation.
 pub async fn get_thumb(
-    State(state): State<AppState>,
-    Path(job_id): Path<String>,
+    state: State<AppState>,
+    user: Extension<UserId>,
+    job_id: Path<String>,
     req: Request,
 ) -> Result<Response, AppError> {
-    #[derive(sqlx::FromRow)]
-    struct Row {
-        status: String,
-        output_path: Option<String>,
-        thumb_path: Option<String>,
-    }
-    let row: Row = sqlx::query_as("SELECT status, output_path, thumb_path FROM jobs WHERE id = ?")
+    serve_derived(
+        state,
+        user,
+        job_id,
+        req,
+        "thumb_path",
+        subdir::THUMBS,
+        THUMB_MAX_EDGE,
+    )
+    .await
+}
+
+/// ~1280px JPEG, sized for full-screen phone viewing. Same lazy-fallback story.
+pub async fn get_preview(
+    state: State<AppState>,
+    user: Extension<UserId>,
+    job_id: Path<String>,
+    req: Request,
+) -> Result<Response, AppError> {
+    serve_derived(
+        state,
+        user,
+        job_id,
+        req,
+        "preview_path",
+        subdir::PREVIEWS,
+        PREVIEW_MAX_EDGE,
+    )
+    .await
+}
+
+async fn serve_derived(
+    State(state): State<AppState>,
+    Extension(user): Extension<UserId>,
+    Path(job_id): Path<String>,
+    req: Request,
+    column: &'static str,
+    sub: &'static str,
+    max_edge: u32,
+) -> Result<Response, AppError> {
+    // `column` is one of two hardcoded constants — never user input.
+    let sql = format!(
+        "SELECT status, output_path, {column} FROM jobs \
+         WHERE id = ? AND user_id = ? AND deleted_at IS NULL"
+    );
+    let row: Option<(String, Option<String>, Option<String>)> = sqlx::query_as(&sql)
         .bind(&job_id)
+        .bind(user.0)
         .fetch_optional(&state.db)
-        .await?
-        .ok_or(AppError::NotFound)?;
-    if row.status != "done" {
+        .await?;
+    let (status, output_path, derived_rel) = row.ok_or(AppError::NotFound)?;
+    if status != "done" {
         return Err(AppError::NotReady);
     }
 
-    // Fast path: cached thumb on disk.
-    if let Some(rel) = row.thumb_path.as_deref() {
+    // Fast path: pre-generated file on disk.
+    if let Some(rel) = derived_rel.as_deref() {
         let abs = state.config.data_dir.join(rel);
         if tokio::fs::metadata(&abs).await.is_ok() {
-            return serve_file(&abs, "image/jpeg", req.headers()).await;
+            return serve_file_with_ct(&abs, "image/jpeg", req.headers()).await;
         }
-        // Fall through to regenerate if the file is missing.
     }
 
-    // Lazy generate.
-    let output_rel = row.output_path.ok_or_else(|| {
+    // Lazy fallback: generate on demand for jobs that finished before the
+    // worker started writing this rendition (or whose file got removed).
+    let output_rel = output_path.ok_or_else(|| {
         AppError::Internal(anyhow::anyhow!("done job {job_id} missing output_path"))
     })?;
     let output_abs = state.config.data_dir.join(&output_rel);
-    let thumb_rel = format!("thumbs/{job_id}.jpg");
-    let thumb_abs = state.config.data_dir.join(&thumb_rel);
-
-    if let Some(parent) = thumb_abs.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-
-    // Write to a unique temp file in the same dir, then atomic rename. This
-    // is safe under concurrent requests: the worst case is that two workers
-    // both generate and the second rename overwrites — both produce
-    // identical content so readers never see a torn JPEG.
-    let thumb_abs_final = thumb_abs.clone();
-    let tmp_abs = thumb_abs.with_extension(format!("jpg.tmp-{}", uuid::Uuid::new_v4()));
-    let bytes = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<u8>> {
-        let img = image::ImageReader::open(&output_abs)?.decode()?;
-        let thumb = img.resize(
-            THUMB_SIDE,
-            THUMB_SIDE,
-            image::imageops::FilterType::Lanczos3,
-        );
-        let mut buf: Vec<u8> = Vec::new();
-        thumb.write_to(
-            &mut std::io::Cursor::new(&mut buf),
-            image::ImageFormat::Jpeg,
-        )?;
-        std::fs::write(&tmp_abs, &buf)?;
-        if let Err(e) = std::fs::rename(&tmp_abs, &thumb_abs_final) {
-            // Rename failed — best-effort cleanup so we don't leak the tmp.
-            let _ = std::fs::remove_file(&tmp_abs);
-            return Err(e.into());
-        }
-        Ok(buf)
-    })
+    let abs = derived_images::ensure_one(
+        &state.db,
+        &state.config.data_dir,
+        user,
+        &job_id,
+        &output_abs,
+        sub,
+        max_edge,
+        column,
+    )
     .await
-    .map_err(|e| AppError::Internal(anyhow::anyhow!("thumb join: {e}")))?
     .map_err(AppError::Internal)?;
-
-    // Remember where we wrote it.
-    sqlx::query("UPDATE jobs SET thumb_path = ? WHERE id = ?")
-        .bind(&thumb_rel)
-        .bind(&job_id)
-        .execute(&state.db)
-        .await?;
-
-    // Freshly generated: serve in-memory and attach the same ETag we'd
-    // compute on a cached hit so the next request can revalidate.
-    let etag = match tokio::fs::metadata(&thumb_abs).await {
-        Ok(meta) => etag_for(&meta),
-        Err(_) => None,
-    };
-    Ok(image_response_bytes("image/jpeg", bytes, etag))
+    serve_file_with_ct(&abs, "image/jpeg", req.headers()).await
 }
 
-/// Stream a file, honoring `If-None-Match` when the file's (len, mtime)
-/// ETag matches. 404 if the file is missing.
-async fn serve_file(
+/// Stream a file (configurable content-type), honoring `If-None-Match`
+/// when the file's (len, mtime) ETag matches. 404 if the file is missing.
+pub async fn serve_file_with_ct(
     abs: &FsPath,
-    content_type: &'static str,
+    content_type: &str,
     req_headers: &HeaderMap,
 ) -> Result<Response, AppError> {
     let meta = tokio::fs::metadata(abs)
@@ -184,7 +175,9 @@ async fn serve_file(
 
     let mut resp = Response::new(body);
     let headers = resp.headers_mut();
-    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+    if let Ok(v) = HeaderValue::from_str(content_type) {
+        headers.insert(header::CONTENT_TYPE, v);
+    }
     headers.insert(
         header::CACHE_CONTROL,
         HeaderValue::from_static(CACHE_HEADER),
@@ -200,10 +193,6 @@ async fn serve_file(
     Ok(resp)
 }
 
-/// Compute a weak-style ETag from file metadata. Since every served image
-/// is write-once (inputs written at submit, outputs written at job done,
-/// thumbs written on first generate and then stable), `(len, mtime_ns)`
-/// uniquely identifies a given file's contents.
 fn etag_for(meta: &std::fs::Metadata) -> Option<String> {
     let mtime_ns = meta
         .modified()
@@ -225,26 +214,4 @@ fn content_type_for(rel: &str) -> &'static str {
         Some("png") => "image/png",
         _ => "application/octet-stream",
     }
-}
-
-/// In-memory byte response used only for the freshly-generated thumbnail
-/// path (where we already have the bytes and want to avoid an extra read).
-fn image_response_bytes(
-    content_type: &'static str,
-    bytes: Vec<u8>,
-    etag: Option<String>,
-) -> Response {
-    let mut resp = Response::new(Body::from(bytes));
-    let headers = resp.headers_mut();
-    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
-    headers.insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static(CACHE_HEADER),
-    );
-    if let Some(etag_val) = etag
-        && let Ok(v) = HeaderValue::from_str(&etag_val)
-    {
-        headers.insert(header::ETAG, v);
-    }
-    resp
 }

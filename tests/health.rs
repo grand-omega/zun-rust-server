@@ -14,7 +14,7 @@ async fn health_returns_ok_and_version() {
         .router
         .oneshot(
             Request::builder()
-                .uri("/api/health")
+                .uri("/api/v1/health")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -36,7 +36,7 @@ async fn health_reports_comfy_reachability_shape() {
         .router
         .oneshot(
             Request::builder()
-                .uri("/api/health")
+                .uri("/api/v1/health")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -46,8 +46,6 @@ async fn health_reports_comfy_reachability_shape() {
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
     let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
 
-    // Fresh test app: monitor never ran, so comfy is reported "not yet ok"
-    // (no successful probe yet, no failures yet).
     assert_eq!(body["comfy"]["ok"], false);
     assert!(body["comfy"]["last_ok_at"].is_null());
     assert_eq!(body["comfy"]["consecutive_failures"], 0);
@@ -60,7 +58,7 @@ async fn response_carries_x_request_id() {
         .router
         .oneshot(
             Request::builder()
-                .uri("/api/health")
+                .uri("/api/v1/health")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -83,7 +81,7 @@ async fn client_supplied_request_id_is_propagated() {
         .router
         .oneshot(
             Request::builder()
-                .uri("/api/health")
+                .uri("/api/v1/health")
                 .header("x-request-id", "client-supplied-id-123")
                 .body(Body::empty())
                 .unwrap(),
@@ -100,13 +98,32 @@ async fn client_supplied_request_id_is_propagated() {
 }
 
 #[tokio::test]
+async fn health_includes_disk_usage_field() {
+    let app = common::test_app().await;
+    let resp = app
+        .router
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    // Field is present even with no users dir yet.
+    assert!(body["disk"]["data_users_bytes"].as_u64().is_some());
+}
+
+#[tokio::test]
 async fn unknown_route_returns_404() {
     let app = common::test_app().await;
     let resp = app
         .router
         .oneshot(
             Request::builder()
-                .uri("/api/nope")
+                .uri("/api/v1/nope")
                 .body(Body::empty())
                 .unwrap(),
         )

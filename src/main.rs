@@ -2,16 +2,14 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
 use zun_rust_server::{
-    AppState, Config, auth::AuthLimiter, comfy::ComfyClient, comfy_monitor, db, logging, prompts,
-    router, worker, workflow,
+    AppState, Config, auth::AuthLimiter, backup, comfy::ComfyClient, comfy_monitor, db, logging,
+    purge, router, worker, workflow,
 };
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let config = Config::load()?;
     logging::init(config.log_format)?;
-    // Only log the first 8 chars of the token so you can eyeball a match
-    // against the Android side without leaking the full secret into journald.
     let token_preview = format!("{}…", &config.token[..8.min(config.token.len())]);
     tracing::info!(
         data_dir = %config.data_dir.display(),
@@ -23,21 +21,6 @@ async fn main() -> anyhow::Result<()> {
 
     let pool = db::init(&config.data_dir).await?;
 
-    let prompts_path = config.data_dir.join("prompts.toml");
-    if !prompts_path.exists() {
-        let example = config.data_dir.join("prompts.example.toml");
-        anyhow::bail!(
-            "prompts file not found: {}\n\
-             Create it from the template and edit with your prompts:\n    \
-             cp {} {}\n\
-             Or run `just setup` to bootstrap everything.",
-            prompts_path.display(),
-            example.display(),
-            prompts_path.display(),
-        );
-    }
-    let mut prompts = prompts::load(&prompts_path)?;
-
     let workflows_dir = config.data_dir.join("workflows");
     let workflows = workflow::load_templates(&workflows_dir)?;
     tracing::info!(
@@ -46,18 +29,6 @@ async fn main() -> anyhow::Result<()> {
         "workflow templates loaded"
     );
 
-    if !workflows.contains_key(&config.custom_prompt_workflow) {
-        let available: Vec<_> = workflows.keys().collect();
-        anyhow::bail!(
-            "custom_prompt_workflow '{}' not found in {}; available: {:?}",
-            config.custom_prompt_workflow,
-            workflows_dir.display(),
-            available,
-        );
-    }
-    prompts::inject_custom(&mut prompts, config.custom_prompt_workflow.clone());
-    tracing::info!(n = prompts.len(), path = %prompts_path.display(), "prompts loaded");
-
     let comfy = ComfyClient::new(&config.comfy_url)?;
     let comfy_health = comfy_monitor::new_handle();
     let (worker_tx, worker_rx) = mpsc::channel::<()>(1);
@@ -65,23 +36,25 @@ async fn main() -> anyhow::Result<()> {
     let state = AppState {
         db: pool,
         config: config.clone(),
-        prompts: Arc::new(prompts),
         workflows: Arc::new(workflows),
         comfy: comfy.clone(),
         comfy_health: comfy_health.clone(),
         worker_tx,
         auth_limiter: AuthLimiter::new(),
+        disk_usage_cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
     };
 
-    // Broadcast-once shutdown channel. Axum, the worker, and the comfy
-    // monitor all subscribe. Signal handler flips it to true.
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
     comfy_monitor::spawn(comfy, comfy_health, shutdown_rx.clone());
     worker::spawn(state.clone(), worker_rx, shutdown_rx.clone());
+    purge::spawn(state.clone(), shutdown_rx.clone());
+    backup::spawn(
+        state.db.clone(),
+        state.config.data_dir.clone(),
+        shutdown_rx.clone(),
+    );
 
-    // Install signal handler. First SIGTERM or Ctrl+C triggers graceful
-    // shutdown; a second signal after 30s would need a forced kill.
     tokio::spawn(async move {
         wait_for_shutdown_signal().await;
         tracing::info!("shutdown signal received");
@@ -92,8 +65,6 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(addr = %config.bind, "zun-rust-server listening");
 
     let mut axum_shutdown_rx = shutdown_rx;
-    // Use `into_make_service_with_connect_info` so the auth middleware can
-    // extract the peer IP for the per-IP failure rate limiter.
     axum::serve(
         listener,
         router(state).into_make_service_with_connect_info::<SocketAddr>(),
@@ -112,8 +83,6 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Wait for Ctrl+C (SIGINT) or SIGTERM, whichever arrives first. On
-/// non-unix platforms SIGTERM is unavailable and only Ctrl+C is handled.
 async fn wait_for_shutdown_signal() {
     let ctrl_c = async {
         if let Err(e) = tokio::signal::ctrl_c().await {

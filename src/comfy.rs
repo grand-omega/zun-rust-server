@@ -233,6 +233,18 @@ impl ComfyClient {
         .await
     }
 
+    /// Cancel ComfyUI's currently-executing prompt. Idempotent: if nothing
+    /// is running, ComfyUI 200s anyway. Used by the cancel handler when a
+    /// user wants to stop a job that's already running on the GPU.
+    pub async fn interrupt(&self) -> anyhow::Result<()> {
+        self.http
+            .post(format!("{}/interrupt", self.base))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
     /// Lightweight liveness probe. Succeeds if ComfyUI answers `/system_stats`
     /// with a 2xx. Used by the background health monitor. Uses a dedicated
     /// short-timeout client so a stuck ComfyUI doesn't stall the probe loop.

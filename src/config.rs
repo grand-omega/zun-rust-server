@@ -13,14 +13,6 @@ pub struct Config {
     pub data_dir: PathBuf,
     #[serde(default)]
     pub log_format: LogFormat,
-    /// Workflow stem used when prompt_id is "__custom__". Must match a file
-    /// in the workflows directory (without the .json extension).
-    #[serde(default = "default_custom_prompt_workflow")]
-    pub custom_prompt_workflow: String,
-}
-
-fn default_custom_prompt_workflow() -> String {
-    "flux2_klein_edit".into()
 }
 
 fn default_bind() -> String {
@@ -48,7 +40,7 @@ impl Config {
         Self::from_file("config.toml")
     }
 
-    fn from_file(path: impl AsRef<Path>) -> anyhow::Result<Self> {
+    pub fn from_file(path: impl AsRef<Path>) -> anyhow::Result<Self> {
         let path = path.as_ref();
         let text = std::fs::read_to_string(path)
             .map_err(|e| anyhow::anyhow!("cannot read {}: {}", path.display(), e))?;

@@ -1,13 +1,19 @@
 pub mod auth;
+pub mod backup;
 pub mod comfy;
 pub mod comfy_monitor;
 pub mod config;
+pub mod custom_prompts;
 pub mod db;
+pub mod derived_images;
 pub mod error;
 mod handlers;
+pub mod hash;
 mod images;
+pub mod inputs;
 pub mod logging;
-pub mod prompts;
+pub mod paths;
+pub mod purge;
 pub mod state;
 pub mod worker;
 pub mod workflow;
@@ -33,25 +39,45 @@ use tower_http::{
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Multipart upload cap for POST /api/jobs.
+/// Multipart upload cap for POST /api/v1/jobs.
 pub(crate) const MAX_UPLOAD_BYTES: usize = 20 * 1024 * 1024;
+
+/// Default per-job timeout for the ComfyUI poll loop. Overridable per
+/// custom_prompts row via `timeout_seconds`.
+pub const DEFAULT_TIMEOUT_SECONDS: u64 = 60;
 
 pub fn router(state: AppState) -> Router {
     let authed = Router::new()
-        .route("/api/prompts", get(handlers::list_prompts))
+        // Custom prompts CRUD
         .route(
-            "/api/jobs",
+            "/api/v1/prompts",
+            post(custom_prompts::create).get(custom_prompts::list),
+        )
+        .route(
+            "/api/v1/prompts/{id}",
+            get(custom_prompts::get_one)
+                .patch(custom_prompts::update)
+                .delete(custom_prompts::delete),
+        )
+        // Jobs
+        .route(
+            "/api/v1/jobs",
             post(handlers::submit_job)
                 .get(handlers::list_jobs)
                 .layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
         )
         .route(
-            "/api/jobs/{id}",
+            "/api/v1/jobs/{id}",
             get(handlers::get_job).delete(handlers::delete_job),
         )
-        .route("/api/jobs/{id}/input", get(images::get_input))
-        .route("/api/jobs/{id}/result", get(images::get_result))
-        .route("/api/jobs/{id}/thumb", get(images::get_thumb))
+        .route("/api/v1/jobs/{id}/restore", post(handlers::restore_job))
+        .route("/api/v1/jobs/{id}/cancel", post(handlers::cancel_job))
+        .route("/api/v1/jobs/{id}/result", get(images::get_result))
+        .route("/api/v1/jobs/{id}/thumb", get(images::get_thumb))
+        .route("/api/v1/jobs/{id}/preview", get(images::get_preview))
+        // Inputs (read-only)
+        .route("/api/v1/inputs/{id}", get(inputs::get_input))
+        .route("/api/v1/inputs/{id}/file", get(inputs::get_input_file))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_bearer,
@@ -59,7 +85,7 @@ pub fn router(state: AppState) -> Router {
         .with_state(state.clone());
 
     let app = Router::new()
-        .route("/api/health", get(health))
+        .route("/api/v1/health", get(health))
         .with_state(state)
         .merge(authed);
 
@@ -88,11 +114,11 @@ pub fn router(state: AppState) -> Router {
     )
 }
 
-/// Liveness + ComfyUI reachability. Unauthenticated — Android uses this
-/// to show a connection banner. Doesn't include detailed error strings
-/// to avoid leaking internal info from an anonymous endpoint.
+/// Liveness + ComfyUI reachability + cached disk usage. Unauthenticated —
+/// Android uses this to show a connection banner.
 async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
     let h = state.comfy_health.read().await;
+    let disk_bytes = compute_or_reuse_disk_usage(&state).await;
     Json(json!({
         "status": "ok",
         "version": VERSION,
@@ -100,6 +126,53 @@ async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
             "ok": h.is_healthy(),
             "last_ok_at": h.last_ok_at,
             "consecutive_failures": h.consecutive_failures,
+        },
+        "disk": {
+            "data_users_bytes": disk_bytes,
         }
     }))
+}
+
+const DISK_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+async fn compute_or_reuse_disk_usage(state: &AppState) -> Option<u64> {
+    {
+        let guard = state.disk_usage_cache.lock().expect("disk cache poisoned");
+        if let Some(sample) = *guard
+            && sample.computed_at.elapsed() < DISK_CACHE_TTL
+        {
+            return Some(sample.total_bytes);
+        }
+    }
+    let dir = state.config.data_dir.join("users");
+    let total = tokio::task::spawn_blocking(move || dir_size(&dir).unwrap_or(0))
+        .await
+        .ok()?;
+    let mut guard = state.disk_usage_cache.lock().expect("disk cache poisoned");
+    *guard = Some(state::DiskUsageSample {
+        total_bytes: total,
+        computed_at: std::time::Instant::now(),
+    });
+    Some(total)
+}
+
+fn dir_size(dir: &std::path::Path) -> std::io::Result<u64> {
+    let mut total = 0u64;
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(e),
+    };
+    for entry in entries.flatten() {
+        let meta = match entry.metadata() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if meta.is_dir() {
+            total = total.saturating_add(dir_size(&entry.path())?);
+        } else if meta.is_file() {
+            total = total.saturating_add(meta.len());
+        }
+    }
+    Ok(total)
 }
