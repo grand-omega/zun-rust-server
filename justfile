@@ -34,13 +34,13 @@ setup:
         chmod 600 config.toml
         echo "wrote config.toml — edit it: set token and bind address."
     fi
-    if [[ -f data/prompts.yaml ]]; then
-        echo "data/prompts.yaml already exists — leaving it alone."
-    elif [[ ! -f data/prompts.example.yaml ]]; then
-        echo "error: data/prompts.example.yaml missing." >&2
+    if [[ -f data/prompts.toml ]]; then
+        echo "data/prompts.toml already exists — leaving it alone."
+    elif [[ ! -f data/prompts.example.toml ]]; then
+        echo "error: data/prompts.example.toml missing." >&2
         exit 1
     else
-        cp data/prompts.example.yaml data/prompts.yaml
-        echo "wrote data/prompts.yaml — edit with your real prompts."
+        cp data/prompts.example.toml data/prompts.toml
+        echo "wrote data/prompts.toml — edit with your real prompts."
     fi
     echo "next: cargo run"

@@ -23,9 +23,9 @@ async fn main() -> anyhow::Result<()> {
 
     let pool = db::init(&config.data_dir).await?;
 
-    let prompts_path = config.data_dir.join("prompts.yaml");
+    let prompts_path = config.data_dir.join("prompts.toml");
     if !prompts_path.exists() {
-        let example = config.data_dir.join("prompts.example.yaml");
+        let example = config.data_dir.join("prompts.example.toml");
         anyhow::bail!(
             "prompts file not found: {}\n\
              Create it from the template and edit with your prompts:\n    \

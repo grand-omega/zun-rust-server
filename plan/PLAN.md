@@ -51,7 +51,7 @@ The Python side (project-zun) ships ~10 workflow JSON templates across two model
 
 - **FLUX 2 klein** — fast, maskless image-to-image edits. `flux2_klein_edit.json` is the **primary / daily driver for v1**.
 - **FLUX.1 Fill** — mask-based inpainting (GDINO+SAM auto-masking). Available but slower; wired in after the klein path is solid.
-- Future workflows (klein t2i, ref-edit, new model families) are expected. The server's design treats workflows as opaque templates keyed by filename; adding a new one should be a prompts.yaml edit, not a code change.
+- Future workflows (klein t2i, ref-edit, new model families) are expected. The server's design treats workflows as opaque templates keyed by filename; adding a new one should be a prompts.toml edit, not a code change.
 
 ### Deliberate non-goals
 
@@ -71,9 +71,9 @@ A Linux workstation with a GPU running FLUX2 via ComfyUI. Server reachable from 
 ### Defaults
 
 - **Config:** `config.toml` (gitignored). Copy from `config.example.toml` and edit.
-- **Data directory:** `./data/` — houses `jobs.db`, `inputs/`, `outputs/`, `thumbs/`, `workflows/`, `prompts.yaml`.
+- **Data directory:** `./data/` — houses `jobs.db`, `inputs/`, `outputs/`, `thumbs/`, `workflows/`, `prompts.toml`.
 - **Workflows directory:** `./data/workflows/` symlinked to `../project-zun/workflows/`.
-- **Prompts file:** `./data/prompts.yaml` (gitignored). Copy from `data/prompts.example.yaml`.
+- **Prompts file:** `./data/prompts.toml` (gitignored). Copy from `data/prompts.example.toml`.
 - **Bind address:** `0.0.0.0:8080` — accepts connections on all interfaces (LAN, Tailscale, loopback).
 - **Progress:** `GET /api/jobs/{id}` returns `progress: null`. WebSocket progress deferred.
 - **Image format:** outputs served as PNG, thumbnails as 400 px JPEG.
@@ -104,7 +104,7 @@ A Linux workstation with a GPU running FLUX2 via ComfyUI. Server reachable from 
 |    |-- outputs/      (ComfyUI results)                      |
 |    |-- thumbs/       (server-generated 400px thumbnails)    |
 |    |-- workflows/    (ComfyUI workflow templates)           |
-|    `-- prompts.yaml  (prompt catalog)                       |
+|    `-- prompts.toml  (prompt catalog)                       |
 +-------------------------------------------------------------+
 ```
 
@@ -156,7 +156,7 @@ Concretely:
 | HTTP client | `reqwest` with `rustls-tls` | Talks to ComfyUI's HTTP API (plain HTTP on localhost; rustls reserved for future HTTPS calls) |
 | Database | `sqlx` with SQLite, `runtime-tokio` | Compile-time checked queries, async; no TLS needed for local SQLite |
 | TLS (server, later) | `axum-server` + `tokio-rustls` | Terminates HTTPS for Tailscale cert |
-| Serialization | `serde` + `serde_json` + `serde_yaml_ng` | Standard (serde_yaml is deprecated; _ng is the maintained fork) |
+| Serialization | `serde` + `serde_json` + `toml` | TOML for config and prompts catalog; JSON on the wire |
 | Image processing | `image` crate | Thumbnail generation (pure Rust) |
 | Logging | `tracing` + `tracing-subscriber` | Structured logs, integrates with axum |
 | Middleware | `tower-http` | CORS, limits, tracing, auth helpers |
@@ -182,7 +182,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "str
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "macros", "migrate", "chrono"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde_yaml_ng = "0.10"
+toml = "1"
 image = "0.25"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -243,7 +243,7 @@ Version numbers are a snapshot — bump to current stable at project start.
 CREATE TABLE jobs (
     id              TEXT PRIMARY KEY,            -- UUID v4
     status          TEXT NOT NULL,               -- queued | running | done | failed
-    prompt_id       TEXT NOT NULL,               -- matches prompts.yaml
+    prompt_id       TEXT NOT NULL,               -- matches prompts.toml
     input_path      TEXT NOT NULL,               -- relative to /srv/zun
     output_path     TEXT,                        -- relative to /srv/zun
     thumb_path      TEXT,                        -- relative to /srv/zun
@@ -330,7 +330,7 @@ Response 200:
 
 Submit a new job. `multipart/form-data`:
 - `image` (file, required): input image (JPEG or PNG, up to 20 MB)
-- `prompt_id` (field, required): must match an id in `prompts.yaml`
+- `prompt_id` (field, required): must match an id in `prompts.toml`
 
 Response 201:
 ```json
@@ -449,12 +449,12 @@ The Python side in `project-zun/workflows/` ships multiple templates, each expor
 |---------------|--------|-----|
 | `flux2_klein_edit.json` | FLUX 2 klein | **Primary v1 target** — fast maskless edit |
 | `flux_fill_auto_mask.json` | FLUX.1 Fill | Secondary; mask-based inpainting |
-| (future) | any | Add by dropping a JSON + adding a prompts.yaml entry |
+| (future) | any | Add by dropping a JSON + adding a prompts.toml entry |
 
 The server:
 - On startup, scans its configured `workflows/` directory and loads every `*.json` into `HashMap<String, serde_json::Value>` keyed by filename (without `.json`).
 - Does **not** hardcode node IDs. It treats each template as opaque — substitution happens via string placeholders (see below).
-- Each prompt in `prompts.yaml` declares which workflow file it binds to.
+- Each prompt in `prompts.toml` declares which workflow file it binds to.
 
 ### Placeholder substitution (not node-ID patching)
 
@@ -715,7 +715,7 @@ let _ = state.worker_tx.try_send(());
   workflows/
     flux2_klein_edit.json   # primary v1 workflow (FLUX 2 klein)
     flux_fill_auto_mask.json  # optional secondary (FLUX.1 Fill)
-  prompts.yaml             # prompt catalog
+  prompts.toml             # prompt catalog
   config.toml              # non-secret runtime config
 ```
 
@@ -810,7 +810,7 @@ async fn serve_thumb(job_id: &str, state: &AppState) -> Result<Response, AppErro
 
 ## Prompts configuration
 
-`prompts.yaml` defines the catalog of predefined prompts. Edit-and-restart workflow: change the file, `systemctl restart zun-server`. The Android app fetches `/api/prompts` on home screen entry.
+`prompts.toml` defines the catalog of predefined prompts. Edit-and-restart workflow: change the file, `systemctl restart zun-server`. The Android app fetches `/api/prompts` on home screen entry.
 
 ### Format
 
@@ -1019,7 +1019,7 @@ zun-rust-server/
 ├── workflows/
 │   └── flux2_klein_edit.json   # primary; copied in from project-zun/workflows/
 ├── config.example.toml         # template config
-├── prompts.example.yaml        # template prompts
+├── prompts.example.toml        # template prompts
 ├── deploy/
 │   ├── zun-server.service         # systemd unit
 │   └── env.example             # template for EnvironmentFile
@@ -1076,7 +1076,7 @@ zun-rust-server/
 /etc/env
 deploy/env
 config.toml
-prompts.yaml
+prompts.toml
 workflows/*.json
 !workflows/*.example.json
 ```
@@ -1542,7 +1542,7 @@ Claude can't talk to your actual ComfyUI instance. For Milestone 5, use a wiremo
 ### Files to protect
 
 - Never let Claude edit `/etc/zun/env` or commit the real token
-- Never let Claude include the real `prompts.yaml` contents in code examples — those are your prompt engineering IP
+- Never let Claude include the real `prompts.toml` contents in code examples — those are your prompt engineering IP
 - Review any changes to `deploy/zun-server.service` carefully (sandboxing directives)
 
 ### Stable decisions (do not change)

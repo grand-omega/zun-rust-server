@@ -3,11 +3,11 @@ use std::{collections::HashMap, path::Path};
 use serde::{Deserialize, Serialize};
 
 /// Default per-prompt timeout. Suits FLUX2 klein (typical ~7s). Bump
-/// per-prompt in prompts.yaml for slower workflows (e.g. FLUX.1 Fill).
+/// per-prompt in prompts.toml for slower workflows (e.g. FLUX.1 Fill).
 pub const DEFAULT_TIMEOUT_SECONDS: u64 = 60;
 
 /// Reserved prompt ID for free-text custom prompts. Injected at startup;
-/// never appears in prompts.yaml.
+/// never appears in prompts.toml.
 pub const CUSTOM_PROMPT_ID: &str = "__custom__";
 
 fn default_timeout_seconds() -> u64 {
@@ -53,14 +53,15 @@ struct PromptsFile {
     prompts: Vec<Prompt>,
 }
 
-/// Load prompts from a YAML file. Returns a map keyed by prompt id. The
-/// insertion order of `prompts.yaml` is preserved by iterating the source
+/// Load prompts from a TOML file. Returns a map keyed by prompt id. The
+/// insertion order of `prompts.toml` is preserved by iterating the source
 /// Vec — callers that need ordered output should iterate the file list,
 /// not the HashMap.
 pub fn load(path: &Path) -> anyhow::Result<HashMap<String, Prompt>> {
     let raw = std::fs::read_to_string(path)
         .map_err(|e| anyhow::anyhow!("read prompts file {}: {e}", path.display()))?;
-    let parsed: PromptsFile = serde_yaml_ng::from_str(&raw)?;
+    let parsed: PromptsFile = toml::from_str(&raw)
+        .map_err(|e| anyhow::anyhow!("parse prompts file {}: {e}", path.display()))?;
     let mut map = HashMap::with_capacity(parsed.prompts.len());
     for p in parsed.prompts {
         if map.contains_key(&p.id) {

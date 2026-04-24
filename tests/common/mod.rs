@@ -12,28 +12,29 @@ use zun_rust_server::{
 /// Bearer token used by all tests.
 pub const TEST_TOKEN: &str = "test-token-0123456789abcdef";
 
-/// Prompt ids that `test_app` seeds into `prompts.yaml`.
+/// Prompt ids that `test_app` seeds into `prompts.toml`.
 #[allow(dead_code)]
 pub const KNOWN_PROMPT_ID: &str = "test_prompt";
 #[allow(dead_code)]
 pub const MASK_PROMPT_ID: &str = "test_mask";
 
-const TEST_PROMPTS_YAML: &str = "\
-prompts:
-  - id: test_prompt
-    label: Test Prompt
-    description: A stand-in prompt for tests
-    text: test prompt text
-    workflow: flux2_klein_edit
+const TEST_PROMPTS_TOML: &str = r#"
+[[prompts]]
+id = "test_prompt"
+label = "Test Prompt"
+description = "A stand-in prompt for tests"
+text = "test prompt text"
+workflow = "flux2_klein_edit"
 
-  - id: test_mask
-    label: Test Mask
-    text: test mask prompt
-    workflow: flux_fill_auto_mask
-";
+[[prompts]]
+id = "test_mask"
+label = "Test Mask"
+text = "test mask prompt"
+workflow = "flux_fill_auto_mask"
+"#;
 
 /// A fully-wired test app backed by a fresh temp-dir SQLite and a
-/// seeded prompts.yaml. Keep `_tempdir` alive for the test lifetime.
+/// seeded prompts.toml. Keep `_tempdir` alive for the test lifetime.
 pub struct TestApp {
     pub router: Router,
     // Other test binaries don't need direct DB access; gallery/worker tests do.
@@ -55,8 +56,8 @@ pub async fn test_app_with_comfy(comfy_url: &str) -> TestApp {
     let tempdir = tempfile::tempdir().expect("create tempdir");
     let pool = db::init(tempdir.path()).await.expect("init db");
 
-    let prompts_path = tempdir.path().join("prompts.yaml");
-    std::fs::write(&prompts_path, TEST_PROMPTS_YAML).expect("write test prompts");
+    let prompts_path = tempdir.path().join("prompts.toml");
+    std::fs::write(&prompts_path, TEST_PROMPTS_TOML).expect("write test prompts");
     let mut prompts_map = prompts::load(&prompts_path).expect("parse test prompts");
     prompts::inject_custom(&mut prompts_map, "flux2_klein_edit".to_string());
 
