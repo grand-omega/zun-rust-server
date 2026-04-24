@@ -3,9 +3,11 @@
 //! Lifecycle per job:
 //! 1. Reset `running` rows left over from a previous crash (on startup).
 //! 2. Pick the oldest `queued` row.
-//! 3. Mark it `running`, upload the input, submit the patched workflow,
-//!    poll `/history` until it materialises (bounded by a per-job timeout),
-//!    download the primary output, write to disk, mark `done`.
+//! 3. Mark it `running`, upload the input, open a ws tagged with a per-job
+//!    `client_id`, submit the patched workflow, wait on the ws for the
+//!    terminal event (bounded by a per-job timeout), fetch `/history` once
+//!    for the structured outputs, download the primary output, write to
+//!    disk, mark `done`.
 //! 4. Any error → mark `failed` with message; move on.
 //!
 //! Concurrency: exactly one job at a time. FLUX2 saturates the GPU.
@@ -15,11 +17,8 @@ use std::time::Duration;
 use sqlx::SqlitePool;
 use tokio::sync::{mpsc, watch};
 
-use crate::{
-    AppState, comfy::ComfyClient, comfy::HistoryEntry, prompts::CUSTOM_PROMPT_ID, workflow,
-};
+use crate::{AppState, comfy, prompts::CUSTOM_PROMPT_ID, workflow};
 
-const POLL_INTERVAL: Duration = Duration::from_millis(1000);
 const IDLE_TICK: Duration = Duration::from_secs(30);
 
 /// Spawn the worker on the current tokio runtime. Returns the JoinHandle
@@ -217,7 +216,7 @@ async fn process_job(state: &AppState, job: &QueuedJob) -> anyhow::Result<()> {
     let upload_name = format!("zun_{}.{ext}", job.id);
     let stored_name = state.comfy.upload_image(input_bytes, &upload_name).await?;
 
-    // Patch workflow and submit.
+    // Patch workflow.
     let prompt_text = if job.prompt_id == CUSTOM_PROMPT_ID {
         job.custom_prompt.as_deref().ok_or_else(|| {
             anyhow::anyhow!("__custom__ job {} is missing custom_prompt text", job.id)
@@ -226,15 +225,31 @@ async fn process_job(state: &AppState, job: &QueuedJob) -> anyhow::Result<()> {
         &prompt.text
     };
     let patched = workflow::build_edit_workflow(template, prompt_text, &stored_name, &job.id);
-    let comfy_prompt_id = state.comfy.submit_prompt(&patched).await?;
+
+    // Open the ws BEFORE submitting so we don't miss events between
+    // queueing and execution. One client id per job keeps routing simple
+    // and avoids cross-talk if we ever widen to concurrent jobs.
+    let client_id = uuid::Uuid::new_v4().to_string();
+    let mut ws = state.comfy.connect_ws(&client_id).await?;
+
+    let comfy_prompt_id = state.comfy.submit_prompt(&patched, &client_id).await?;
     update_comfy_prompt_id(&state.db, &job.id, &comfy_prompt_id).await?;
     tracing::info!(job_id = %job.id, comfy_prompt_id = %comfy_prompt_id, "submitted to comfyui");
 
-    // Poll /history, bounded by the per-prompt job timeout.
+    // Wait on ws for the terminal event, bounded by the per-prompt timeout.
     let timeout = Duration::from_secs(prompt.timeout_seconds);
-    let entry = tokio::time::timeout(timeout, poll_until_history(&state.comfy, &comfy_prompt_id))
+    tokio::time::timeout(timeout, comfy::await_completion(&mut ws, &comfy_prompt_id))
         .await
         .map_err(|_| anyhow::anyhow!("comfyui timeout after {}s", prompt.timeout_seconds))??;
+
+    // One /history fetch for the structured outputs payload.
+    let entry = state
+        .comfy
+        .get_history(&comfy_prompt_id)
+        .await?
+        .ok_or_else(|| {
+            anyhow::anyhow!("comfy /history empty after completion for {comfy_prompt_id}")
+        })?;
 
     if !entry.succeeded() {
         let status_str = entry.status.status_str.as_deref().unwrap_or("unknown");
@@ -311,13 +326,4 @@ async fn process_job(state: &AppState, job: &QueuedJob) -> anyhow::Result<()> {
         duration_ms = started_at.elapsed().as_millis() as u64,
     );
     Ok(())
-}
-
-async fn poll_until_history(comfy: &ComfyClient, prompt_id: &str) -> anyhow::Result<HistoryEntry> {
-    loop {
-        if let Some(entry) = comfy.get_history(prompt_id).await? {
-            return Ok(entry);
-        }
-        tokio::time::sleep(POLL_INTERVAL).await;
-    }
 }

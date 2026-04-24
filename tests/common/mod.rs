@@ -53,6 +53,17 @@ pub struct TestApp {
 /// Build a TestApp with `comfy_url` pointing at a wiremock server (or any
 /// URL — if no worker is spawned, it's never called).
 pub async fn test_app_with_comfy(comfy_url: &str) -> TestApp {
+    // No ws mock by default; worker tests that exercise completion should
+    // use `test_app_with_comfy_and_ws`. Point ws at an unreachable address
+    // so any accidental connect fails fast rather than hanging.
+    test_app_with_comfy_and_ws(comfy_url, "ws://127.0.0.1:1").await
+}
+
+/// Like `test_app_with_comfy` but lets the caller supply a ws base URL —
+/// used by worker integration tests that stand up both a wiremock HTTP
+/// mock and a separate tokio-tungstenite ws mock on different ports.
+#[allow(dead_code)]
+pub async fn test_app_with_comfy_and_ws(comfy_url: &str, ws_url: &str) -> TestApp {
     let tempdir = tempfile::tempdir().expect("create tempdir");
     let pool = db::init(tempdir.path()).await.expect("init db");
 
@@ -69,7 +80,7 @@ pub async fn test_app_with_comfy(comfy_url: &str) -> TestApp {
         log_format: zun_rust_server::config::LogFormat::Auto,
         custom_prompt_workflow: "flux2_klein_edit".to_string(),
     };
-    let comfy = ComfyClient::new(comfy_url).expect("comfy client");
+    let comfy = ComfyClient::with_ws_base(comfy_url, ws_url).expect("comfy client");
     let (worker_tx, worker_rx) = mpsc::channel::<()>(1);
 
     let state = AppState {
@@ -172,6 +183,46 @@ pub async fn seed_job(
 #[allow(dead_code)]
 pub fn bearer(token: &str) -> String {
     format!("Bearer {token}")
+}
+
+/// Spawn a tiny ws mock that accepts any `/ws?clientId=...` connection and,
+/// for each connected client, sends `frames` in order. Stays open until the
+/// client closes. Returns the `ws://` base URL (no `/ws` suffix — the
+/// client appends that).
+#[allow(dead_code)]
+pub async fn start_ws_mock(frames: Vec<String>) -> String {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio::net::TcpListener;
+    use tokio_tungstenite::{accept_async, tungstenite::Message};
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let frames = frames.clone();
+            tokio::spawn(async move {
+                let Ok(mut ws) = accept_async(stream).await else {
+                    return;
+                };
+                for f in frames {
+                    if ws.send(Message::text(f)).await.is_err() {
+                        return;
+                    }
+                }
+                // Stay open so the client can process the final frame
+                // without racing a close. Exit when the client hangs up.
+                while let Some(Ok(_)) = ws.next().await {}
+            });
+        }
+    });
+    format!("ws://{addr}")
+}
+
+/// Build the ws-mock frame string for a successful completion of
+/// `prompt_id`: one `executing` event with `node:null`.
+#[allow(dead_code)]
+pub fn ws_success_frame(prompt_id: &str) -> String {
+    format!(r#"{{"type":"executing","data":{{"node":null,"prompt_id":"{prompt_id}"}}}}"#)
 }
 
 /// Build a tiny real PNG (decodable by the `image` crate) for tests that

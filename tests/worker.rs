@@ -114,8 +114,12 @@ async fn submit_to_done_roundtrip_via_worker() {
         .mount(&comfy)
         .await;
 
+    // Ws mock: on connect, immediately send the successful completion
+    // event for our known prompt id.
+    let ws_url = common::start_ws_mock(vec![common::ws_success_frame("fake-prompt-xyz")]).await;
+
     // Build the test app and wire it to the fake ComfyUI.
-    let mut app = common::test_app_with_comfy(&comfy.uri()).await;
+    let mut app = common::test_app_with_comfy_and_ws(&comfy.uri(), &ws_url).await;
     common::seed_workflow(&mut app, "flux2_klein_edit", minimal_workflow());
     let router = app.router.clone();
 
@@ -133,8 +137,8 @@ async fn submit_to_done_roundtrip_via_worker() {
         .unwrap()
         .to_string();
 
-    // Install a history mock — first empty (pending), then complete —
-    // worker polls until the entry materialises.
+    // Install a history mock — worker fetches this once after the ws
+    // completion event, to get the structured outputs payload.
     Mock::given(method("GET"))
         .and(mock_path("/history/fake-prompt-xyz"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -186,19 +190,15 @@ async fn worker_marks_failed_on_comfy_execution_error() {
         )
         .mount(&comfy)
         .await;
-    // History reports execution error.
-    Mock::given(method("GET"))
-        .and(mock_path("/history/bad-prompt"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "bad-prompt": {
-                "status": { "completed": true, "status_str": "error", "messages": [] },
-                "outputs": {}
-            }
-        })))
-        .mount(&comfy)
-        .await;
 
-    let mut app = common::test_app_with_comfy(&comfy.uri()).await;
+    // Ws mock sends an execution_error event for our prompt id.
+    let ws_url = common::start_ws_mock(vec![
+        r#"{"type":"execution_error","data":{"prompt_id":"bad-prompt","exception_message":"boom"}}"#
+            .to_string(),
+    ])
+    .await;
+
+    let mut app = common::test_app_with_comfy_and_ws(&comfy.uri(), &ws_url).await;
     common::seed_workflow(&mut app, "flux2_klein_edit", minimal_workflow());
     let router = app.router.clone();
 
@@ -219,7 +219,7 @@ async fn worker_marks_failed_on_comfy_execution_error() {
     assert_eq!(failed["status"], "failed");
     let err = failed["error"].as_str().unwrap_or("");
     assert!(
-        err.contains("comfyui execution failed"),
+        err.contains("execution_error"),
         "unexpected error message: {err}"
     );
 }
@@ -274,7 +274,9 @@ async fn worker_drains_in_flight_job_then_exits_on_shutdown() {
         .mount(&comfy)
         .await;
 
-    let mut app = common::test_app_with_comfy(&comfy.uri()).await;
+    let ws_url = common::start_ws_mock(vec![common::ws_success_frame("drain-prompt")]).await;
+
+    let mut app = common::test_app_with_comfy_and_ws(&comfy.uri(), &ws_url).await;
     common::seed_workflow(&mut app, "flux2_klein_edit", minimal_workflow());
     let router = app.router.clone();
 

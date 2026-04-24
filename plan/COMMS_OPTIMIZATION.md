@@ -2,14 +2,11 @@
 
 This document outlines potential optimizations for the communication bridge between `zun-rust-server` and the ComfyUI backend.
 
-## 1. WebSocket Integration (Reactive Completion)
+## 1. WebSocket Integration (Reactive Completion) — **done**
 
-**Current State:** The worker polls `/history/{prompt_id}` every 1000ms.
-**Proposed Change:** Implement a WebSocket client connecting to ComfyUI's `/ws` endpoint.
-**Benefits:**
-- **Zero Latency:** The worker is notified immediately when a node finishes or a prompt is completed.
-- **Reduced Overhead:** Eliminates the "empty" polling requests that occur during long-running generations (e.g., FLUX).
-- **Rich Feedback:** Enables streaming progress percentages (e.g., "Step 15/20") back to the Android client.
+**Before:** Worker polled `/history/{prompt_id}` every 1000ms.
+**Now:** Worker opens a ws to `/ws?clientId={uuid}` before submitting, tags `POST /prompt` with the matching `client_id`, waits for the terminal event (`executing` with `node:null` → success; `execution_error` → failure), then does one `/history` fetch for the structured outputs payload.
+**Deferred for a later pass:** streaming per-step progress back to the client (would add a `progress` column + API field).
 
 ## 2. Shared Filesystem (Local-Only Optimization)
 
