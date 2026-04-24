@@ -17,7 +17,12 @@ use std::time::Duration;
 use sqlx::SqlitePool;
 use tokio::sync::{mpsc, watch};
 
-use crate::{AppState, comfy, prompts::CUSTOM_PROMPT_ID, workflow};
+use crate::{
+    AppState, comfy,
+    paths::{self, subdir},
+    state::UserId,
+    workflow,
+};
 
 const IDLE_TICK: Duration = Duration::from_secs(30);
 
@@ -42,7 +47,6 @@ async fn run(state: AppState, mut wake: mpsc::Receiver<()>, mut shutdown: watch:
             return;
         }
 
-        // Drain the queue as long as there are jobs to process.
         loop {
             if *shutdown.borrow() {
                 tracing::info!("worker shutting down (mid-drain)");
@@ -51,17 +55,12 @@ async fn run(state: AppState, mut wake: mpsc::Receiver<()>, mut shutdown: watch:
             match fetch_oldest_queued(&state.db).await {
                 Ok(Some(job)) => {
                     let job_id = job.id.clone();
-                    let prompt_id = job.prompt_id.clone();
-                    // Note: if shutdown fires while process_job is running,
-                    // we let that job finish. Shutdown is checked on the
-                    // next iteration. This is intentional — interrupting
-                    // ComfyUI mid-execution leaves orphaned GPU state.
                     if let Err(e) = process_job(&state, &job).await {
                         tracing::error!(
                             target: "audit",
                             event = "job.failed",
                             job_id = %job_id,
-                            %prompt_id,
+                            user_id = job.user_id,
                             error = ?e,
                             "job failed",
                         );
@@ -81,7 +80,6 @@ async fn run(state: AppState, mut wake: mpsc::Receiver<()>, mut shutdown: watch:
             }
         }
 
-        // Wait for a new submission, idle tick, or shutdown.
         tokio::select! {
             _ = wake.recv() => {},
             _ = tokio::time::sleep(IDLE_TICK) => {},
@@ -98,15 +96,18 @@ async fn run(state: AppState, mut wake: mpsc::Receiver<()>, mut shutdown: watch:
 #[derive(sqlx::FromRow)]
 struct QueuedJob {
     id: String,
-    prompt_id: String,
-    input_path: String,
-    custom_prompt: Option<String>,
+    user_id: i64,
+    input_id: i64,
+    prompt_id: Option<i64>,
+    prompt_text: Option<String>,
+    workflow: String,
+    seed: i64,
 }
 
 async fn fetch_oldest_queued(db: &SqlitePool) -> anyhow::Result<Option<QueuedJob>> {
     let row = sqlx::query_as::<_, QueuedJob>(
-        "SELECT id, prompt_id, input_path, custom_prompt FROM jobs \
-         WHERE status = 'queued' ORDER BY created_at ASC LIMIT 1",
+        "SELECT id, user_id, input_id, prompt_id, prompt_text, workflow, seed \
+         FROM jobs WHERE status = 'queued' ORDER BY created_at ASC LIMIT 1",
     )
     .fetch_optional(db)
     .await?;
@@ -124,14 +125,21 @@ async fn reset_running_jobs(db: &SqlitePool) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn mark_running(db: &SqlitePool, job_id: &str) -> anyhow::Result<()> {
+/// Atomically claim a queued job. Returns `Ok(true)` if we transitioned
+/// queued→running, `Ok(false)` if the row is no longer queued (someone
+/// cancelled/deleted between fetch and claim). Caller must abort processing
+/// when this returns false.
+async fn mark_running(db: &SqlitePool, job_id: &str) -> anyhow::Result<bool> {
     let now = chrono::Utc::now().timestamp();
-    sqlx::query("UPDATE jobs SET status = 'running', started_at = ? WHERE id = ?")
-        .bind(now)
-        .bind(job_id)
-        .execute(db)
-        .await?;
-    Ok(())
+    let res = sqlx::query(
+        "UPDATE jobs SET status = 'running', started_at = ? \
+         WHERE id = ? AND status = 'queued'",
+    )
+    .bind(now)
+    .bind(job_id)
+    .execute(db)
+    .await?;
+    Ok(res.rows_affected() == 1)
 }
 
 async fn update_comfy_prompt_id(
@@ -147,17 +155,20 @@ async fn update_comfy_prompt_id(
     Ok(())
 }
 
+/// Transition running→done. Returns `Ok(false)` if the row is no longer in
+/// `running` (e.g. user cancelled while ComfyUI was busy); caller should
+/// then skip derived-image generation since the job is no longer "ours".
 async fn mark_done(
     db: &SqlitePool,
     job_id: &str,
     output_path: &str,
     width: Option<i64>,
     height: Option<i64>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     let now = chrono::Utc::now().timestamp();
-    sqlx::query(
+    let res = sqlx::query(
         "UPDATE jobs SET status = 'done', output_path = ?, completed_at = ?, \
-         width = ?, height = ? WHERE id = ?",
+         width = ?, height = ? WHERE id = ? AND status = 'running'",
     )
     .bind(output_path)
     .bind(now)
@@ -166,13 +177,17 @@ async fn mark_done(
     .bind(job_id)
     .execute(db)
     .await?;
-    Ok(())
+    Ok(res.rows_affected() == 1)
 }
 
 async fn mark_failed(db: &SqlitePool, job_id: &str, error_message: &str) -> anyhow::Result<()> {
     let now = chrono::Utc::now().timestamp();
+    // Gated on status='running': if the user cancelled the job concurrently,
+    // the cancel handler has already flipped the row to 'cancelled' and we
+    // must not overwrite that with 'failed'.
     sqlx::query(
-        "UPDATE jobs SET status = 'failed', error_message = ?, completed_at = ? WHERE id = ?",
+        "UPDATE jobs SET status = 'failed', error_message = ?, completed_at = ? \
+         WHERE id = ? AND status = 'running'",
     )
     .bind(error_message)
     .bind(now)
@@ -184,51 +199,64 @@ async fn mark_failed(db: &SqlitePool, job_id: &str, error_message: &str) -> anyh
 
 async fn process_job(state: &AppState, job: &QueuedJob) -> anyhow::Result<()> {
     let started_at = std::time::Instant::now();
-    mark_running(&state.db, &job.id).await?;
+    let user = UserId(job.user_id);
+    if !mark_running(&state.db, &job.id).await? {
+        // Lost the queued→running race: the row is no longer queued (most
+        // likely cancelled or hard-deleted between fetch and now). Drop the
+        // job silently — there's nothing to do, and mark_failed would
+        // overwrite the new status.
+        tracing::info!(
+            target: "audit",
+            event = "job.skipped_not_queued",
+            job_id = %job.id,
+            user_id = job.user_id,
+        );
+        return Ok(());
+    }
     tracing::info!(
         target: "audit",
         event = "job.running",
         job_id = %job.id,
-        prompt_id = %job.prompt_id,
+        user_id = job.user_id,
+        workflow = %job.workflow,
+        seed = job.seed,
     );
 
-    // Resolve prompt + workflow template.
-    let prompt = state
-        .prompts
-        .get(&job.prompt_id)
-        .ok_or_else(|| anyhow::anyhow!("unknown prompt_id: {}", job.prompt_id))?;
+    // Resolve workflow template + prompt text (+ optional timeout override).
     let template = state
         .workflows
-        .get(&prompt.workflow)
-        .ok_or_else(|| anyhow::anyhow!("workflow template missing: {}", prompt.workflow))?;
+        .get(&job.workflow)
+        .ok_or_else(|| anyhow::anyhow!("workflow template missing: {}", job.workflow))?;
 
-    // Read input bytes from disk.
-    let input_abs = state.config.data_dir.join(&job.input_path);
+    let (prompt_text, timeout_seconds) = resolve_prompt_and_timeout(state, job).await?;
+
+    // Read input bytes from the per-user cache by input_id.
+    let input_path: Option<String> =
+        sqlx::query_scalar("SELECT path FROM inputs WHERE id = ? AND user_id = ?")
+            .bind(job.input_id)
+            .bind(job.user_id)
+            .fetch_optional(&state.db)
+            .await?
+            .flatten();
+    let input_rel = input_path
+        .ok_or_else(|| anyhow::anyhow!("input file purged for input_id {}", job.input_id))?;
+    let input_abs = state.config.data_dir.join(&input_rel);
     let input_bytes = tokio::fs::read(&input_abs)
         .await
         .map_err(|e| anyhow::anyhow!("read input {}: {e}", input_abs.display()))?;
 
-    // Upload to ComfyUI — filename is what the LoadImage node will reference.
-    let ext = std::path::Path::new(&job.input_path)
+    let ext = std::path::Path::new(&input_rel)
         .extension()
         .and_then(|s| s.to_str())
         .unwrap_or("jpg");
     let upload_name = format!("zun_{}.{ext}", job.id);
     let stored_name = state.comfy.upload_image(input_bytes, &upload_name).await?;
 
-    // Patch workflow.
-    let prompt_text = if job.prompt_id == CUSTOM_PROMPT_ID {
-        job.custom_prompt.as_deref().ok_or_else(|| {
-            anyhow::anyhow!("__custom__ job {} is missing custom_prompt text", job.id)
-        })?
-    } else {
-        &prompt.text
-    };
-    let patched = workflow::build_edit_workflow(template, prompt_text, &stored_name, &job.id);
+    // Patch workflow: prompt + image + filename prefix + seed.
+    let patched =
+        workflow::build_edit_workflow(template, &prompt_text, &stored_name, &job.id, job.seed);
 
-    // Open the ws BEFORE submitting so we don't miss events between
-    // queueing and execution. One client id per job keeps routing simple
-    // and avoids cross-talk if we ever widen to concurrent jobs.
+    // Open ws BEFORE submit so we don't miss events between queue and execute.
     let client_id = uuid::Uuid::new_v4().to_string();
     let mut ws = state.comfy.connect_ws(&client_id).await?;
 
@@ -236,13 +264,11 @@ async fn process_job(state: &AppState, job: &QueuedJob) -> anyhow::Result<()> {
     update_comfy_prompt_id(&state.db, &job.id, &comfy_prompt_id).await?;
     tracing::info!(job_id = %job.id, comfy_prompt_id = %comfy_prompt_id, "submitted to comfyui");
 
-    // Wait on ws for the terminal event, bounded by the per-prompt timeout.
-    let timeout = Duration::from_secs(prompt.timeout_seconds);
+    let timeout = Duration::from_secs(timeout_seconds);
     tokio::time::timeout(timeout, comfy::await_completion(&mut ws, &comfy_prompt_id))
         .await
-        .map_err(|_| anyhow::anyhow!("comfyui timeout after {}s", prompt.timeout_seconds))??;
+        .map_err(|_| anyhow::anyhow!("comfyui timeout after {timeout_seconds}s"))??;
 
-    // One /history fetch for the structured outputs payload.
     let entry = state
         .comfy
         .get_history(&comfy_prompt_id)
@@ -256,7 +282,6 @@ async fn process_job(state: &AppState, job: &QueuedJob) -> anyhow::Result<()> {
         anyhow::bail!("comfyui execution failed (status={status_str})");
     }
 
-    // Pick our output (filtering out mask_preview_* side outputs).
     let prefix = format!("zun_{}", job.id);
     let output_img = entry
         .primary_output(&prefix)
@@ -265,7 +290,6 @@ async fn process_job(state: &AppState, job: &QueuedJob) -> anyhow::Result<()> {
         })?
         .clone();
 
-    // Download and save.
     let bytes = state
         .comfy
         .view(
@@ -274,18 +298,18 @@ async fn process_job(state: &AppState, job: &QueuedJob) -> anyhow::Result<()> {
             &output_img.r#type,
         )
         .await?;
-    let rel_output = format!("outputs/{}", output_img.filename);
-    let abs_output = state.config.data_dir.join(&rel_output);
+    let abs_output = paths::user_data_path(
+        &state.config.data_dir,
+        user,
+        subdir::OUTPUTS,
+        &output_img.filename,
+    )?;
     if let Some(parent) = abs_output.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
     tokio::fs::write(&abs_output, &bytes).await?;
+    let rel_output = relative_for_db(&abs_output, &state.config.data_dir);
 
-    // Cheap dimension read via image's ImageReader::into_dimensions;
-    // non-fatal if the file isn't a decodable image (shouldn't happen
-    // since ComfyUI produces PNGs, but we don't want this to fail the job).
-    // Log at warn instead of silently swallowing so a pipeline regression
-    // producing non-decodable outputs is visible.
     let abs_output_for_read = abs_output.clone();
     let dim_result = tokio::task::spawn_blocking(move || -> anyhow::Result<(u32, u32)> {
         let reader = image::ImageReader::open(&abs_output_for_read)?;
@@ -313,12 +337,38 @@ async fn process_job(state: &AppState, job: &QueuedJob) -> anyhow::Result<()> {
         }
     };
 
-    mark_done(&state.db, &job.id, &rel_output, width, height).await?;
+    if !mark_done(&state.db, &job.id, &rel_output, width, height).await? {
+        // Lost the running→done race: someone (most likely the cancel
+        // handler) flipped the row out of `running` while ComfyUI was
+        // working. Skip the derived-image work and the audit-done event
+        // — the new status is the source of truth.
+        tracing::info!(
+            target: "audit",
+            event = "job.completion_discarded",
+            job_id = %job.id,
+            user_id = job.user_id,
+            "comfy completed but row no longer running; cancellation/delete won the race",
+        );
+        return Ok(());
+    }
+
+    // Eager render of thumb + preview so the phone never pays for encode
+    // latency on first view. Failures are logged inside the helper and
+    // never bubble up — the job is already done.
+    crate::derived_images::generate_for_job(
+        &state.db,
+        &state.config.data_dir,
+        user,
+        &job.id,
+        &abs_output,
+    )
+    .await;
+
     tracing::info!(
         target: "audit",
         event = "job.done",
         job_id = %job.id,
-        prompt_id = %job.prompt_id,
+        user_id = job.user_id,
         output = %rel_output,
         output_bytes = bytes.len(),
         width = ?width,
@@ -326,4 +376,43 @@ async fn process_job(state: &AppState, job: &QueuedJob) -> anyhow::Result<()> {
         duration_ms = started_at.elapsed().as_millis() as u64,
     );
     Ok(())
+}
+
+/// Resolve `(prompt_text, timeout_seconds)` from `prompt_id` (DB lookup) or
+/// `prompt_text` (free-text on the job row itself).
+async fn resolve_prompt_and_timeout(
+    state: &AppState,
+    job: &QueuedJob,
+) -> anyhow::Result<(String, u64)> {
+    if let Some(pid) = job.prompt_id {
+        // Note: not filtering on deleted_at — a job submitted before the
+        // prompt was deleted should still run. The handler validated at
+        // submit time that the prompt existed and was not deleted.
+        let row: Option<(String, Option<i64>)> = sqlx::query_as(
+            "SELECT text, timeout_seconds FROM custom_prompts \
+             WHERE id = ? AND user_id = ?",
+        )
+        .bind(pid)
+        .bind(job.user_id)
+        .fetch_optional(&state.db)
+        .await?;
+        let (text, timeout) = row.ok_or_else(|| anyhow::anyhow!("prompt id {pid} disappeared"))?;
+        Ok((
+            text,
+            timeout
+                .map(|t| t as u64)
+                .unwrap_or(crate::DEFAULT_TIMEOUT_SECONDS),
+        ))
+    } else {
+        let text = job.prompt_text.clone().ok_or_else(|| {
+            anyhow::anyhow!("job {} missing both prompt_id and prompt_text", job.id)
+        })?;
+        Ok((text, crate::DEFAULT_TIMEOUT_SECONDS))
+    }
+}
+
+fn relative_for_db(abs: &std::path::Path, data_dir: &std::path::Path) -> String {
+    abs.strip_prefix(data_dir)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| abs.to_string_lossy().into_owned())
 }
