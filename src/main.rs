@@ -21,7 +21,7 @@ async fn main() -> anyhow::Result<()> {
 
     let pool = db::init(&config.data_dir).await?;
 
-    let workflows_dir = config.data_dir.join("workflows");
+    let workflows_dir = config.resolved_workflows_dir();
     let workflows = workflow::load_templates(&workflows_dir)?;
     tracing::info!(
         n = workflows.len(),
@@ -41,7 +41,7 @@ async fn main() -> anyhow::Result<()> {
         comfy_health: comfy_health.clone(),
         worker_tx,
         auth_limiter: AuthLimiter::new(),
-        disk_usage_cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        disk_usage_cache: Arc::new(parking_lot::Mutex::new(None)),
     };
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);

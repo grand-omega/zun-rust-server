@@ -317,6 +317,6 @@ async fn build_state(
         comfy_health: zun_rust_server::comfy_monitor::new_handle(),
         worker_tx,
         auth_limiter: zun_rust_server::auth::AuthLimiter::new(),
-        disk_usage_cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        disk_usage_cache: std::sync::Arc::new(parking_lot::Mutex::new(None)),
     })
 }

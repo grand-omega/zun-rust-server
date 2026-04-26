@@ -18,5 +18,11 @@ comfy_url = "http://127.0.0.1:8188"
 # Where jobs.db, inputs/, outputs/, and thumbs/ are stored.
 data_dir = "./data"
 
+# Directory holding ComfyUI workflow templates (`*.json`). Authored in the
+# sibling project-zun repo; the server loads them at startup. If unset,
+# defaults to `<data_dir>/workflows`. Set this when project-zun lives on
+# a different host or path than this server's data_dir.
+# workflows_dir = "/path/to/project-zun/workflows"
+
 # Log format: "auto" (pretty on TTY, JSON otherwise), "pretty", or "json".
 log_format = "auto"

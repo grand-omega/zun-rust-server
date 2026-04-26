@@ -11,6 +11,10 @@ pub struct Config {
     pub comfy_url: String,
     #[serde(default = "default_data_dir")]
     pub data_dir: PathBuf,
+    /// Directory holding the ComfyUI workflow templates (`*.json`).
+    /// Defaults to `<data_dir>/workflows` when unset.
+    #[serde(default)]
+    pub workflows_dir: Option<PathBuf>,
     #[serde(default)]
     pub log_format: LogFormat,
 }
@@ -50,5 +54,13 @@ impl Config {
             anyhow::bail!("token must be at least 16 characters");
         }
         Ok(config)
+    }
+
+    /// Resolved workflow templates directory: explicit `workflows_dir` if set,
+    /// otherwise `<data_dir>/workflows`.
+    pub fn resolved_workflows_dir(&self) -> PathBuf {
+        self.workflows_dir
+            .clone()
+            .unwrap_or_else(|| self.data_dir.join("workflows"))
     }
 }
