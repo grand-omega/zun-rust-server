@@ -23,7 +23,7 @@ token:
     fi
     echo "$VAL"
 
-# Bootstrap: copy config and prompts template if they don't exist yet.
+# Bootstrap: copy config if it doesn't exist yet. v2 prompts live in the DB.
 setup:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -34,13 +34,9 @@ setup:
         chmod 600 config.toml
         echo "wrote config.toml — edit it: set token and bind address."
     fi
-    if [[ -f data/prompts.yaml ]]; then
-        echo "data/prompts.yaml already exists — leaving it alone."
-    elif [[ ! -f data/prompts.example.yaml ]]; then
-        echo "error: data/prompts.example.yaml missing." >&2
-        exit 1
-    else
-        cp data/prompts.example.yaml data/prompts.yaml
-        echo "wrote data/prompts.yaml — edit with your real prompts."
-    fi
     echo "next: cargo run"
+    echo "then: just seed-prompts"
+
+# Seed the starter prompts into the default admin user.
+seed-prompts:
+    cargo run --bin zun-admin -- seed-prompts admin --from starter_prompts.toml

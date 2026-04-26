@@ -16,15 +16,15 @@ Prerequisites:
 
 ```bash
 cp config.example.toml config.toml   # then edit: set token, bind address
-cp data/prompts.example.yaml data/prompts.yaml   # then edit with your real prompts
-cargo run
+cargo run                            # creates data/jobs.db with the v2 schema and seeds user_id=1
+cargo run --bin zun-admin -- seed-prompts admin --from starter_prompts.toml
 ```
 
-Hit `/api/health` to verify:
+Hit `/api/v1/health` to verify:
 
 ```bash
-curl -s localhost:8080/api/health | jq
-# { "status": "ok", "version": "0.2.0", "comfy": { "ok": true, ... } }
+curl -s localhost:8080/api/v1/health | jq
+# { "status": "ok", "version": "0.1.0", "comfy": { "ok": true, ... } }
 ```
 
 ## Configuration
@@ -36,7 +36,7 @@ All config lives in `config.toml` (gitignored). Copy from `config.example.toml`:
 | `token` | — (required) | Bearer token for the Android client |
 | `bind` | `0.0.0.0:8080` | Listen address — works on LAN and Tailscale simultaneously |
 | `comfy_url` | `http://127.0.0.1:8188` | ComfyUI HTTP base |
-| `data_dir` | `./data` | Houses `jobs.db`, `inputs/`, `outputs/`, `thumbs/`, `workflows/`, `prompts.yaml` |
+| `data_dir` | `./data` | Houses `jobs.db`, `users/<uid>/{cache,outputs,thumbs}/`, and the `workflows/` symlink |
 | `log_format` | `auto` | `auto` (pretty on TTY, JSON otherwise), `pretty`, or `json` |
 
 `RUST_LOG` env var still works for log-level tuning (e.g. `RUST_LOG=debug`).

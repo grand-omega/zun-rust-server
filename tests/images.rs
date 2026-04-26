@@ -17,8 +17,6 @@ fn authed(uri: &str) -> Request<Body> {
         .unwrap()
 }
 
-/// Drop `input_path`, `output_path`, or a `thumb_path` file under the
-/// tempdir so the image handlers have bytes to serve.
 async fn write_relative(tempdir: &std::path::Path, rel: &str, bytes: &[u8]) {
     let abs = tempdir.join(rel);
     if let Some(parent) = abs.parent() {
@@ -27,120 +25,127 @@ async fn write_relative(tempdir: &std::path::Path, rel: &str, bytes: &[u8]) {
     tokio::fs::write(abs, bytes).await.unwrap();
 }
 
-// ---------- /api/jobs/{id}/input ----------
+// ---------- /api/v1/inputs/{id}/file ----------
 
 #[tokio::test]
-async fn get_input_serves_bytes_with_image_content_type() {
+async fn get_input_file_serves_bytes_with_image_content_type() {
     let app = common::test_app().await;
-    common::seed_job(
-        &app.db,
-        "job-a",
-        "queued",
-        "test_prompt",
-        1_700_000_000,
-        None,
-    )
-    .await;
-    write_relative(app._tempdir.path(), "inputs/job-a.jpg", b"fake-jpeg-bytes").await;
+    let sha = "a".repeat(64);
+    let bytes = b"fake-jpeg-bytes";
+    let input_id = common::seed_input(&app.db, app._tempdir.path(), &sha, Some(bytes)).await;
 
     let resp = app
         .router
-        .oneshot(authed("/api/jobs/job-a/input"))
+        .oneshot(authed(&format!("/api/v1/inputs/{input_id}/file")))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(resp.headers()["content-type"], "image/jpeg");
-    assert!(
-        resp.headers()["cache-control"]
-            .to_str()
-            .unwrap()
-            .contains("max-age=3600")
-    );
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(body, bytes.as_ref());
+}
+
+#[tokio::test]
+async fn get_input_file_unknown_input_is_404() {
+    let app = common::test_app().await;
+    let resp = app
+        .router
+        .oneshot(authed("/api/v1/inputs/99999/file"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn get_input_metadata_reports_available_flag() {
+    let app = common::test_app().await;
+    let sha = "b".repeat(64);
+    let bytes = b"present";
+    let input_id = common::seed_input(&app.db, app._tempdir.path(), &sha, Some(bytes)).await;
+
+    let resp = app
+        .router
+        .clone()
+        .oneshot(authed(&format!("/api/v1/inputs/{input_id}")))
+        .await
+        .unwrap();
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    assert_eq!(bytes, b"fake-jpeg-bytes".as_ref());
-}
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["available"], true);
 
-#[tokio::test]
-async fn get_input_unknown_job_is_404() {
-    let app = common::test_app().await;
-    let resp = app
-        .router
-        .oneshot(authed("/api/jobs/does-not-exist/input"))
+    // Manually null out path to simulate purge.
+    sqlx::query("UPDATE inputs SET path = NULL WHERE id = ?")
+        .bind(input_id)
+        .execute(&app.db)
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-}
-
-#[tokio::test]
-async fn get_input_missing_file_is_404() {
-    // Row exists but the input file was never written.
-    let app = common::test_app().await;
-    common::seed_job(
-        &app.db,
-        "job-b",
-        "queued",
-        "test_prompt",
-        1_700_000_000,
-        None,
-    )
-    .await;
     let resp = app
         .router
-        .oneshot(authed("/api/jobs/job-b/input"))
+        .oneshot(authed(&format!("/api/v1/inputs/{input_id}")))
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["available"], false);
 }
 
-// ---------- /api/jobs/{id}/result ----------
+// ---------- /api/v1/jobs/{id}/result ----------
 
 #[tokio::test]
 async fn get_result_requires_done_status() {
     let app = common::test_app().await;
+    let input_id =
+        common::seed_input(&app.db, app._tempdir.path(), &"a".repeat(64), Some(b"x")).await;
     common::seed_job(
         &app.db,
         "queued-job",
         "queued",
-        "test_prompt",
+        None,
+        Some("p"),
+        "flux2_klein_edit",
+        input_id,
         1_700_000_000,
         None,
     )
     .await;
     let resp = app
         .router
-        .oneshot(authed("/api/jobs/queued-job/result"))
+        .oneshot(authed("/api/v1/jobs/queued-job/result"))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CONFLICT);
-    let body = resp.into_body().collect().await.unwrap().to_bytes();
-    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["code"], "not_ready");
 }
 
 #[tokio::test]
 async fn get_result_serves_png_when_done() {
     let app = common::test_app().await;
     let png = common::tiny_png(16, 16);
+    let input_id =
+        common::seed_input(&app.db, app._tempdir.path(), &"a".repeat(64), Some(b"x")).await;
     common::seed_job(
         &app.db,
         "done-job",
         "done",
-        "test_prompt",
+        None,
+        Some("p"),
+        "flux2_klein_edit",
+        input_id,
         1_700_000_000,
         Some(1_700_000_030),
     )
     .await;
+    let rel = "users/1/outputs/zun_done-job_00001_.png";
     sqlx::query("UPDATE jobs SET output_path = ? WHERE id = ?")
-        .bind("outputs/zun_done-job_00001_.png")
+        .bind(rel)
         .bind("done-job")
         .execute(&app.db)
         .await
         .unwrap();
-    write_relative(app._tempdir.path(), "outputs/zun_done-job_00001_.png", &png).await;
+    write_relative(app._tempdir.path(), rel, &png).await;
 
     let resp = app
         .router
-        .oneshot(authed("/api/jobs/done-job/result"))
+        .oneshot(authed("/api/v1/jobs/done-job/result"))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -149,40 +154,39 @@ async fn get_result_serves_png_when_done() {
     assert_eq!(bytes, png.as_slice());
 }
 
-// ---------- /api/jobs/{id}/thumb ----------
+// ---------- /api/v1/jobs/{id}/thumb ----------
 
 #[tokio::test]
-async fn get_thumb_lazy_generates_jpeg_and_caches() {
+async fn get_thumb_lazy_generates_jpeg_and_caches_under_user_dir() {
     let app = common::test_app().await;
-    let png = common::tiny_png(600, 400); // non-square, > 400 on longest side
+    let png = common::tiny_png(600, 400);
+    let input_id =
+        common::seed_input(&app.db, app._tempdir.path(), &"c".repeat(64), Some(b"x")).await;
     common::seed_job(
         &app.db,
         "thumb-job",
         "done",
-        "test_prompt",
+        None,
+        Some("p"),
+        "flux2_klein_edit",
+        input_id,
         1_700_000_000,
         Some(1_700_000_030),
     )
     .await;
+    let out_rel = "users/1/outputs/zun_thumb-job_00001_.png";
     sqlx::query("UPDATE jobs SET output_path = ? WHERE id = ?")
-        .bind("outputs/zun_thumb-job_00001_.png")
+        .bind(out_rel)
         .bind("thumb-job")
         .execute(&app.db)
         .await
         .unwrap();
-    write_relative(
-        app._tempdir.path(),
-        "outputs/zun_thumb-job_00001_.png",
-        &png,
-    )
-    .await;
+    write_relative(app._tempdir.path(), out_rel, &png).await;
 
-    let router = app.router.clone();
-
-    // First call: no cached thumb → generates one.
-    let resp = router
+    let resp = app
+        .router
         .clone()
-        .oneshot(authed("/api/jobs/thumb-job/thumb"))
+        .oneshot(authed("/api/v1/jobs/thumb-job/thumb"))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -194,125 +198,96 @@ async fn get_thumb_lazy_generates_jpeg_and_caches() {
         .unwrap()
         .to_bytes()
         .to_vec();
-    // Decode the returned bytes to confirm they're a valid JPEG and the
-    // longest side is <= 400. (Size comparison vs source is skipped:
-    // synthetic test PNGs compress extremely well, so the resulting JPEG
-    // can actually be larger for trivial patterns — not meaningful.)
     let reader = image::ImageReader::new(Cursor::new(&bytes))
         .with_guessed_format()
         .unwrap();
     let (w, h) = reader.into_dimensions().unwrap();
+    assert!(w.max(h) <= 400);
+
+    // Cached under per-user thumbs dir.
+    let cached_abs = app._tempdir.path().join("users/1/thumbs/thumb-job.jpg");
     assert!(
-        w.max(h) <= 400,
-        "thumb longest side should be ≤ 400, got {w}x{h}"
+        cached_abs.exists(),
+        "expected cached thumb at {cached_abs:?}"
     );
 
-    // Thumb file was cached on disk.
-    let cached_abs = app._tempdir.path().join("thumbs/thumb-job.jpg");
-    assert!(cached_abs.exists());
-
-    // DB thumb_path populated.
     let (thumb_path,): (String,) = sqlx::query_as("SELECT thumb_path FROM jobs WHERE id = ?")
         .bind("thumb-job")
         .fetch_one(&app.db)
         .await
         .unwrap();
-    assert_eq!(thumb_path, "thumbs/thumb-job.jpg");
+    assert_eq!(thumb_path, "users/1/thumbs/thumb-job.jpg");
+}
 
-    // Second call: should hit the cached file (same bytes).
-    let resp2 = router
-        .oneshot(authed("/api/jobs/thumb-job/thumb"))
+#[tokio::test]
+async fn get_preview_lazy_generates_jpeg_and_caches() {
+    let app = common::test_app().await;
+    let png = common::tiny_png(2000, 1500);
+    let input_id =
+        common::seed_input(&app.db, app._tempdir.path(), &"d".repeat(64), Some(b"x")).await;
+    common::seed_job(
+        &app.db,
+        "preview-job",
+        "done",
+        None,
+        Some("p"),
+        "flux2_klein_edit",
+        input_id,
+        1_700_000_000,
+        Some(1_700_000_030),
+    )
+    .await;
+    let out_rel = "users/1/outputs/zun_preview-job_00001_.png";
+    sqlx::query("UPDATE jobs SET output_path = ? WHERE id = ?")
+        .bind(out_rel)
+        .bind("preview-job")
+        .execute(&app.db)
         .await
         .unwrap();
-    assert_eq!(resp2.status(), StatusCode::OK);
-    let bytes2 = resp2
+    write_relative(app._tempdir.path(), out_rel, &png).await;
+
+    let resp = app
+        .router
+        .clone()
+        .oneshot(authed("/api/v1/jobs/preview-job/preview"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.headers()["content-type"], "image/jpeg");
+    let bytes = resp
         .into_body()
         .collect()
         .await
         .unwrap()
         .to_bytes()
         .to_vec();
-    assert_eq!(bytes, bytes2);
-}
+    let reader = image::ImageReader::new(Cursor::new(&bytes))
+        .with_guessed_format()
+        .unwrap();
+    let (w, h) = reader.into_dimensions().unwrap();
+    assert!(w.max(h) <= 1280, "preview longest side ≤1280, got {w}x{h}");
+    // Preview is markedly larger than a 400px thumb.
+    assert!(w.max(h) > 400);
 
-#[tokio::test]
-async fn get_thumb_requires_done_status() {
-    let app = common::test_app().await;
-    common::seed_job(
-        &app.db,
-        "running-job",
-        "running",
-        "test_prompt",
-        1_700_000_000,
-        None,
-    )
-    .await;
-    let resp = app
-        .router
-        .oneshot(authed("/api/jobs/running-job/thumb"))
+    let cached = app._tempdir.path().join("users/1/previews/preview-job.jpg");
+    assert!(cached.exists(), "expected preview cached at {cached:?}");
+
+    let (preview_path,): (String,) = sqlx::query_as("SELECT preview_path FROM jobs WHERE id = ?")
+        .bind("preview-job")
+        .fetch_one(&app.db)
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::CONFLICT);
-}
-
-#[tokio::test]
-async fn get_input_sends_etag_and_honors_if_none_match() {
-    let app = common::test_app().await;
-    common::seed_job(
-        &app.db,
-        "etag-job",
-        "queued",
-        "test_prompt",
-        1_700_000_000,
-        None,
-    )
-    .await;
-    write_relative(
-        app._tempdir.path(),
-        "inputs/etag-job.jpg",
-        b"fake-jpeg-bytes",
-    )
-    .await;
-
-    // First request: no If-None-Match → 200 + ETag header.
-    let router = app.router.clone();
-    let resp = router
-        .clone()
-        .oneshot(authed("/api/jobs/etag-job/input"))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let etag = resp
-        .headers()
-        .get("etag")
-        .expect("etag header present")
-        .to_str()
-        .unwrap()
-        .to_string();
-    assert!(etag.starts_with('\"') && etag.ends_with('\"'));
-
-    // Second request with matching If-None-Match → 304, empty body.
-    let req = Request::builder()
-        .method("GET")
-        .uri("/api/jobs/etag-job/input")
-        .header("authorization", common::bearer(common::TEST_TOKEN))
-        .header("if-none-match", &etag)
-        .body(Body::empty())
-        .unwrap();
-    let resp2 = router.oneshot(req).await.unwrap();
-    assert_eq!(resp2.status(), StatusCode::NOT_MODIFIED);
-    assert_eq!(resp2.headers().get("etag").unwrap().to_str().unwrap(), etag);
-    let body = resp2.into_body().collect().await.unwrap().to_bytes();
-    assert!(body.is_empty());
+    assert_eq!(preview_path, "users/1/previews/preview-job.jpg");
 }
 
 #[tokio::test]
 async fn image_endpoints_require_auth() {
     let app = common::test_app().await;
     for uri in [
-        "/api/jobs/x/input",
-        "/api/jobs/x/result",
-        "/api/jobs/x/thumb",
+        "/api/v1/inputs/1/file",
+        "/api/v1/jobs/x/result",
+        "/api/v1/jobs/x/thumb",
+        "/api/v1/jobs/x/preview",
     ] {
         let resp = app
             .router

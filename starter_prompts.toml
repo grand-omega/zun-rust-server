@@ -1,0 +1,17 @@
+# Starter prompts. Seed into a fresh user with:
+#   cargo run --bin zun-admin -- seed-prompts admin --from starter_prompts.toml
+# This file is not loaded at runtime — it is purely a seed source.
+
+[[prompts]]
+label = "Anime-ify"
+description = "Transform into anime style with cel shading"
+text = "transform into anime style, cel shaded, vibrant colors, clean line art"
+workflow = "flux2_klein_edit"
+timeout_seconds = 60
+
+[[prompts]]
+label = "Oil painting"
+description = "Classic oil painting rendering"
+text = "oil painting, visible brush strokes, rich impasto texture, Rembrandt lighting"
+workflow = "flux2_klein_edit"
+timeout_seconds = 60

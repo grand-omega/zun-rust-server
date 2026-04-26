@@ -1,3 +1,7 @@
+//! Shared test scaffolding. Builds a `TestApp` that owns a tempdir, a
+//! migrated SQLite, and a fully-wired router. Helpers for seeding rows
+//! and constructing multipart submit bodies live here too.
+
 use std::sync::Arc;
 
 use axum::Router;
@@ -5,60 +9,34 @@ use sqlx::SqlitePool;
 use tempfile::TempDir;
 use tokio::sync::{mpsc, watch};
 use zun_rust_server::{
-    AppState, Config, auth::AuthLimiter, comfy::ComfyClient, comfy_monitor, db, prompts, router,
-    worker,
+    AppState, Config, auth::AuthLimiter, comfy::ComfyClient, comfy_monitor, db, hash, router,
+    state::UserId, worker,
 };
 
-/// Bearer token used by all tests.
 pub const TEST_TOKEN: &str = "test-token-0123456789abcdef";
 
-/// Prompt ids that `test_app` seeds into `prompts.yaml`.
-#[allow(dead_code)]
-pub const KNOWN_PROMPT_ID: &str = "test_prompt";
-#[allow(dead_code)]
-pub const MASK_PROMPT_ID: &str = "test_mask";
+/// User id seeded by `db::init`.
+pub const TEST_USER: UserId = UserId(1);
 
-const TEST_PROMPTS_YAML: &str = "\
-prompts:
-  - id: test_prompt
-    label: Test Prompt
-    description: A stand-in prompt for tests
-    text: test prompt text
-    workflow: flux2_klein_edit
-
-  - id: test_mask
-    label: Test Mask
-    text: test mask prompt
-    workflow: flux_fill_auto_mask
-";
-
-/// A fully-wired test app backed by a fresh temp-dir SQLite and a
-/// seeded prompts.yaml. Keep `_tempdir` alive for the test lifetime.
 pub struct TestApp {
     pub router: Router,
-    // Other test binaries don't need direct DB access; gallery/worker tests do.
     #[allow(dead_code)]
     pub db: SqlitePool,
     #[allow(dead_code)]
     pub state: AppState,
-    /// The receiver half of the wake channel — take this and pass to
-    /// `worker::spawn` in tests that need the worker running. Tests that
-    /// don't need a worker can ignore it (submitted jobs just stay queued).
     #[allow(dead_code)]
     pub worker_rx: Option<mpsc::Receiver<()>>,
     pub _tempdir: TempDir,
 }
 
-/// Build a TestApp with `comfy_url` pointing at a wiremock server (or any
-/// URL — if no worker is spawned, it's never called).
 pub async fn test_app_with_comfy(comfy_url: &str) -> TestApp {
+    test_app_with_comfy_and_ws(comfy_url, "ws://127.0.0.1:1").await
+}
+
+#[allow(dead_code)]
+pub async fn test_app_with_comfy_and_ws(comfy_url: &str, ws_url: &str) -> TestApp {
     let tempdir = tempfile::tempdir().expect("create tempdir");
     let pool = db::init(tempdir.path()).await.expect("init db");
-
-    let prompts_path = tempdir.path().join("prompts.yaml");
-    std::fs::write(&prompts_path, TEST_PROMPTS_YAML).expect("write test prompts");
-    let mut prompts_map = prompts::load(&prompts_path).expect("parse test prompts");
-    prompts::inject_custom(&mut prompts_map, "flux2_klein_edit".to_string());
 
     let config = Config {
         data_dir: tempdir.path().to_path_buf(),
@@ -66,20 +44,19 @@ pub async fn test_app_with_comfy(comfy_url: &str) -> TestApp {
         token: TEST_TOKEN.to_string(),
         comfy_url: comfy_url.to_string(),
         log_format: zun_rust_server::config::LogFormat::Auto,
-        custom_prompt_workflow: "flux2_klein_edit".to_string(),
     };
-    let comfy = ComfyClient::new(comfy_url).expect("comfy client");
+    let comfy = ComfyClient::with_ws_base(comfy_url, ws_url).expect("comfy client");
     let (worker_tx, worker_rx) = mpsc::channel::<()>(1);
 
     let state = AppState {
         db: pool.clone(),
         config,
-        prompts: Arc::new(prompts_map),
         workflows: Arc::new(std::collections::HashMap::new()),
         comfy,
         comfy_health: comfy_monitor::new_handle(),
         worker_tx,
         auth_limiter: AuthLimiter::new(),
+        disk_usage_cache: Arc::new(std::sync::Mutex::new(None)),
     };
     TestApp {
         router: router(state.clone()),
@@ -90,17 +67,11 @@ pub async fn test_app_with_comfy(comfy_url: &str) -> TestApp {
     }
 }
 
-/// Convenience: TestApp with an unreachable comfy URL. Use when the test
-/// doesn't spawn a worker, so the URL never gets dialled.
 #[allow(dead_code)]
 pub async fn test_app() -> TestApp {
     test_app_with_comfy("http://127.0.0.1:1").await
 }
 
-/// Spawn the worker consuming the TestApp's wake channel. Call once per
-/// TestApp; subsequent calls panic because the rx is already taken.
-/// The shutdown receiver is held only by the worker; dropping the sender
-/// side in this helper means the worker runs for the test lifetime.
 #[allow(dead_code)]
 pub fn spawn_worker(app: &mut TestApp) -> tokio::task::JoinHandle<()> {
     let rx = app
@@ -108,14 +79,9 @@ pub fn spawn_worker(app: &mut TestApp) -> tokio::task::JoinHandle<()> {
         .take()
         .expect("worker already spawned for this TestApp");
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
-    // _shutdown_tx dropped here — receiver still sees `false` for the
-    // lifetime of the test. The #[tokio::test] runtime drops the worker
-    // task when the test returns.
     worker::spawn(app.state.clone(), rx, shutdown_rx)
 }
 
-/// Like `spawn_worker`, but returns the shutdown sender so the test can
-/// signal shutdown explicitly and await the worker's exit.
 #[allow(dead_code)]
 pub fn spawn_worker_with_shutdown(
     app: &mut TestApp,
@@ -129,53 +95,139 @@ pub fn spawn_worker_with_shutdown(
     (handle, shutdown_tx)
 }
 
-/// Seed a workflow template into AppState (tests bypass the filesystem
-/// loader). Takes &mut AppState so we can rebuild the Arc<HashMap>.
 #[allow(dead_code)]
 pub fn seed_workflow(app: &mut TestApp, stem: &str, template: serde_json::Value) {
     let mut map = (*app.state.workflows).clone();
     map.insert(stem.to_string(), template);
     let arc = Arc::new(map);
     app.state.workflows = arc.clone();
-    // Rebuild the router so its State<AppState> sees the updated workflows.
     app.router = router(app.state.clone());
 }
 
-/// Insert a jobs row directly, bypassing the submit handler. Useful for
-/// seeding list/delete tests without going through the multipart path.
+/// Insert a custom_prompts row for the test user. Returns the new id.
 #[allow(dead_code)]
+pub async fn seed_prompt(db: &SqlitePool, label: &str, text: &str, workflow: &str) -> i64 {
+    let now = chrono::Utc::now().timestamp();
+    let res = sqlx::query(
+        "INSERT INTO custom_prompts (user_id, label, description, text, workflow, created_at, updated_at) \
+         VALUES (?, ?, NULL, ?, ?, ?, ?)",
+    )
+    .bind(TEST_USER.0)
+    .bind(label)
+    .bind(text)
+    .bind(workflow)
+    .bind(now)
+    .bind(now)
+    .execute(db)
+    .await
+    .expect("seed_prompt");
+    res.last_insert_rowid()
+}
+
+/// Insert an inputs row, optionally writing a fake file. Returns input_id.
+#[allow(dead_code)]
+pub async fn seed_input(
+    db: &SqlitePool,
+    tempdir: &std::path::Path,
+    sha256: &str,
+    bytes: Option<&[u8]>,
+) -> i64 {
+    let now = chrono::Utc::now().timestamp();
+    let path = if let Some(b) = bytes {
+        let rel = format!("users/1/cache/inputs/{sha256}.jpg");
+        let abs = tempdir.join(&rel);
+        std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+        std::fs::write(&abs, b).unwrap();
+        Some(rel)
+    } else {
+        None
+    };
+    let res = sqlx::query(
+        "INSERT INTO inputs (user_id, sha256, path, content_type, size_bytes, created_at, last_used_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(TEST_USER.0)
+    .bind(sha256)
+    .bind(&path)
+    .bind("image/jpeg")
+    .bind(bytes.map(|b| b.len() as i64))
+    .bind(now)
+    .bind(now)
+    .execute(db)
+    .await
+    .expect("seed_input");
+    res.last_insert_rowid()
+}
+
+/// Insert a jobs row directly. Provide an input_id (use seed_input).
+#[allow(dead_code, clippy::too_many_arguments)]
 pub async fn seed_job(
     db: &SqlitePool,
     id: &str,
     status: &str,
-    prompt_id: &str,
+    prompt_id: Option<i64>,
+    prompt_text: Option<&str>,
+    workflow: &str,
+    input_id: i64,
     created_at: i64,
     completed_at: Option<i64>,
 ) {
     sqlx::query(
-        "INSERT INTO jobs (id, status, prompt_id, input_path, created_at, completed_at) \
-         VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO jobs (id, user_id, input_id, prompt_id, prompt_text, workflow, seed, status, created_at, completed_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(id)
-    .bind(status)
+    .bind(TEST_USER.0)
+    .bind(input_id)
     .bind(prompt_id)
-    .bind(format!("inputs/{id}.jpg"))
+    .bind(prompt_text)
+    .bind(workflow)
+    .bind(0_i64)
+    .bind(status)
     .bind(created_at)
     .bind(completed_at)
     .execute(db)
     .await
-    .expect("seed_job insert");
+    .expect("seed_job");
 }
 
-/// Build `Authorization: Bearer <token>` header value.
 #[allow(dead_code)]
 pub fn bearer(token: &str) -> String {
     format!("Bearer {token}")
 }
 
-/// Build a tiny real PNG (decodable by the `image` crate) for tests that
-/// need valid image bytes — e.g., worker output validation and thumbnail
-/// generation.
+#[allow(dead_code)]
+pub async fn start_ws_mock(frames: Vec<String>) -> String {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio::net::TcpListener;
+    use tokio_tungstenite::{accept_async, tungstenite::Message};
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let frames = frames.clone();
+            tokio::spawn(async move {
+                let Ok(mut ws) = accept_async(stream).await else {
+                    return;
+                };
+                for f in frames {
+                    if ws.send(Message::text(f)).await.is_err() {
+                        return;
+                    }
+                }
+                while let Some(Ok(_)) = ws.next().await {}
+            });
+        }
+    });
+    format!("ws://{addr}")
+}
+
+#[allow(dead_code)]
+pub fn ws_success_frame(prompt_id: &str) -> String {
+    format!(r#"{{"type":"executing","data":{{"node":null,"prompt_id":"{prompt_id}"}}}}"#)
+}
+
 #[allow(dead_code)]
 pub fn tiny_png(width: u32, height: u32) -> Vec<u8> {
     use image::{DynamicImage, ImageFormat, RgbImage};
@@ -189,15 +241,27 @@ pub fn tiny_png(width: u32, height: u32) -> Vec<u8> {
     buf
 }
 
-/// Build a multipart/form-data body for submitting a job.
+/// Multipart body for POST /api/v1/jobs. Computes sha256 of `image_bytes`
+/// and includes it as input_sha256.
 #[allow(dead_code)]
-pub fn multipart_image_job(
+pub fn multipart_submit(
     image_bytes: &[u8],
     content_type: &str,
-    prompt_id: &str,
+    prompt_id: Option<i64>,
+    prompt_text: Option<&str>,
+    workflow: Option<&str>,
 ) -> (String, Vec<u8>) {
     let boundary = "----ZunTestBoundary9XyZ";
+    let sha = hash::sha256_hex(image_bytes);
     let mut body: Vec<u8> = Vec::new();
+    let push_text = |body: &mut Vec<u8>, name: &str, value: &str| {
+        body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+        body.extend_from_slice(
+            format!("Content-Disposition: form-data; name=\"{name}\"\r\n\r\n").as_bytes(),
+        );
+        body.extend_from_slice(value.as_bytes());
+        body.extend_from_slice(b"\r\n");
+    };
     body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
     body.extend_from_slice(
         b"Content-Disposition: form-data; name=\"image\"; filename=\"t.bin\"\r\n",
@@ -205,51 +269,32 @@ pub fn multipart_image_job(
     body.extend_from_slice(format!("Content-Type: {content_type}\r\n\r\n").as_bytes());
     body.extend_from_slice(image_bytes);
     body.extend_from_slice(b"\r\n");
-    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
-    body.extend_from_slice(b"Content-Disposition: form-data; name=\"prompt_id\"\r\n\r\n");
-    body.extend_from_slice(prompt_id.as_bytes());
-    body.extend_from_slice(b"\r\n");
+    push_text(&mut body, "input_sha256", &sha);
+    if let Some(pid) = prompt_id {
+        push_text(&mut body, "prompt_id", &pid.to_string());
+    }
+    if let Some(t) = prompt_text {
+        push_text(&mut body, "prompt_text", t);
+    }
+    if let Some(wf) = workflow {
+        push_text(&mut body, "workflow", wf);
+    }
     body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
     (format!("multipart/form-data; boundary={boundary}"), body)
 }
 
-/// Like `multipart_image_job` but includes a `custom_prompt` text field.
+/// Multipart body without the image field — for "missing image" tests.
 #[allow(dead_code)]
-pub fn multipart_image_job_with_custom(
-    image_bytes: &[u8],
-    content_type: &str,
-    prompt_id: &str,
-    custom_prompt: &str,
-) -> (String, Vec<u8>) {
-    let boundary = "----ZunTestBoundary9XyZ";
-    let mut body: Vec<u8> = Vec::new();
-    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
-    body.extend_from_slice(
-        b"Content-Disposition: form-data; name=\"image\"; filename=\"t.bin\"\r\n",
-    );
-    body.extend_from_slice(format!("Content-Type: {content_type}\r\n\r\n").as_bytes());
-    body.extend_from_slice(image_bytes);
-    body.extend_from_slice(b"\r\n");
-    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
-    body.extend_from_slice(b"Content-Disposition: form-data; name=\"prompt_id\"\r\n\r\n");
-    body.extend_from_slice(prompt_id.as_bytes());
-    body.extend_from_slice(b"\r\n");
-    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
-    body.extend_from_slice(b"Content-Disposition: form-data; name=\"custom_prompt\"\r\n\r\n");
-    body.extend_from_slice(custom_prompt.as_bytes());
-    body.extend_from_slice(b"\r\n");
-    body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
-    (format!("multipart/form-data; boundary={boundary}"), body)
-}
-
-/// Same as above but omits the image field (for "missing image" tests).
-#[allow(dead_code)]
-pub fn multipart_no_image(prompt_id: &str) -> (String, Vec<u8>) {
+pub fn multipart_no_image(prompt_id: i64) -> (String, Vec<u8>) {
     let boundary = "----ZunTestBoundary9XyZ";
     let mut body: Vec<u8> = Vec::new();
     body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
     body.extend_from_slice(b"Content-Disposition: form-data; name=\"prompt_id\"\r\n\r\n");
-    body.extend_from_slice(prompt_id.as_bytes());
+    body.extend_from_slice(prompt_id.to_string().as_bytes());
+    body.extend_from_slice(b"\r\n");
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(b"Content-Disposition: form-data; name=\"input_sha256\"\r\n\r\n");
+    body.extend_from_slice(b"deadbeef");
     body.extend_from_slice(b"\r\n");
     body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
     (format!("multipart/form-data; boundary={boundary}"), body)

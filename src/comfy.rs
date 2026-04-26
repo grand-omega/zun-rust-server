@@ -1,29 +1,40 @@
-//! HTTP client for the ComfyUI API used by project-zun.
+//! HTTP + WebSocket client for the ComfyUI API used by project-zun.
 //!
-//! Speaks exactly four endpoints:
+//! Speaks four HTTP endpoints and one WebSocket:
 //! - `POST /upload/image` — push an input image, get back the name ComfyUI stored it under.
-//! - `POST /prompt` — submit a patched workflow JSON, get back a `prompt_id`.
-//! - `GET  /history/{prompt_id}` — poll for completion; empty object until executed.
+//! - `POST /prompt` — submit a patched workflow JSON (with `client_id`), get back a `prompt_id`.
+//! - `GET  /history/{prompt_id}` — fetch outputs once the prompt has finished.
 //! - `GET  /view?filename&subfolder&type` — download an output image.
+//! - `ws   /ws?clientId={id}` — completion/error events for prompts tagged with `client_id`.
 //!
-//! The poll loop and per-job timeout live in the worker (step 4). This module
-//! is stateless plumbing plus just enough types to make the history response
-//! ergonomic.
+//! The worker opens a fresh ws per job, submits with the matching `client_id`,
+//! and waits for the terminal event. `/history` is then fetched once for the
+//! structured outputs payload. The per-job timeout lives in the worker.
 
 use std::collections::HashMap;
 use std::time::Duration;
 
+use futures_util::StreamExt;
 use reqwest::{
     Client,
     multipart::{Form, Part},
 };
 use serde::Deserialize;
 use serde_json::Value;
+use tokio::net::TcpStream;
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message};
+
+/// WebSocket stream used to receive completion events from ComfyUI.
+pub type ComfyWs = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 /// Thin wrapper over `reqwest::Client` with a fixed ComfyUI base URL.
 #[derive(Clone)]
 pub struct ComfyClient {
     base: String,
+    /// Base for `/ws` connections. Derived from `base` by swapping scheme
+    /// (`http`→`ws`, `https`→`wss`). Stored separately so integration
+    /// tests can point the ws at a different port than the HTTP mock.
+    ws_base: String,
     /// Client used for job-related traffic; generous 60s timeout since
     /// /upload/image and /view can ship MBs.
     http: Client,
@@ -96,10 +107,26 @@ where
 
 impl ComfyClient {
     pub fn new(base: impl Into<String>) -> anyhow::Result<Self> {
+        let base = base.into();
+        let ws_base = derive_ws_base(&base);
+        Self::build(base, ws_base)
+    }
+
+    /// Construct with an explicit ws base — for integration tests that
+    /// run the ws mock on a different port than the HTTP mock.
+    pub fn with_ws_base(
+        base: impl Into<String>,
+        ws_base: impl Into<String>,
+    ) -> anyhow::Result<Self> {
+        Self::build(base.into(), ws_base.into())
+    }
+
+    fn build(base: String, ws_base: String) -> anyhow::Result<Self> {
         let http = Client::builder().timeout(Duration::from_secs(60)).build()?;
         let health_http = Client::builder().timeout(Duration::from_secs(10)).build()?;
         Ok(Self {
-            base: base.into(),
+            base,
+            ws_base,
             http,
             health_http,
         })
@@ -137,11 +164,15 @@ impl ComfyClient {
         .await
     }
 
-    async fn submit_prompt_once(&self, workflow: &Value) -> anyhow::Result<String> {
+    async fn submit_prompt_once(
+        &self,
+        workflow: &Value,
+        client_id: &str,
+    ) -> anyhow::Result<String> {
         let resp: Value = self
             .http
             .post(format!("{}/prompt", self.base))
-            .json(&serde_json::json!({ "prompt": workflow }))
+            .json(&serde_json::json!({ "prompt": workflow, "client_id": client_id }))
             .send()
             .await?
             .error_for_status()?
@@ -153,14 +184,28 @@ impl ComfyClient {
             .ok_or_else(|| anyhow::anyhow!("submit_prompt response missing `prompt_id`: {resp}"))
     }
 
-    /// Submit an already-patched workflow. Returns ComfyUI's prompt id.
-    pub async fn submit_prompt(&self, workflow: &Value) -> anyhow::Result<String> {
+    /// Submit an already-patched workflow. `client_id` tags the prompt so
+    /// events for it are routed to the ws connection opened with the same id.
+    /// Returns ComfyUI's prompt id.
+    pub async fn submit_prompt(&self, workflow: &Value, client_id: &str) -> anyhow::Result<String> {
         // ConnectOnly: a retry after a timeout mid-request could duplicate
         // the submission since ComfyUI may have already accepted it.
         with_retry("submit_prompt", Idempotency::ConnectOnly, || {
-            self.submit_prompt_once(workflow)
+            self.submit_prompt_once(workflow, client_id)
         })
         .await
+    }
+
+    /// Open a WebSocket to ComfyUI's `/ws` endpoint tagged with `client_id`.
+    /// Events for prompts submitted with the matching `client_id` will arrive
+    /// on this stream until it's closed. Call before `submit_prompt` so no
+    /// events are missed between queueing and executing.
+    pub async fn connect_ws(&self, client_id: &str) -> anyhow::Result<ComfyWs> {
+        let url = format!("{}/ws?clientId={client_id}", self.ws_base);
+        let (ws, _resp) = connect_async(&url)
+            .await
+            .map_err(|e| anyhow::anyhow!("connect comfy ws {url}: {e}"))?;
+        Ok(ws)
     }
 
     async fn get_history_once(&self, prompt_id: &str) -> anyhow::Result<Option<HistoryEntry>> {
@@ -186,6 +231,18 @@ impl ComfyClient {
             self.get_history_once(prompt_id)
         })
         .await
+    }
+
+    /// Cancel ComfyUI's currently-executing prompt. Idempotent: if nothing
+    /// is running, ComfyUI 200s anyway. Used by the cancel handler when a
+    /// user wants to stop a job that's already running on the GPU.
+    pub async fn interrupt(&self) -> anyhow::Result<()> {
+        self.http
+            .post(format!("{}/interrupt", self.base))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
     }
 
     /// Lightweight liveness probe. Succeeds if ComfyUI answers `/system_stats`
@@ -233,6 +290,46 @@ impl ComfyClient {
         })
         .await
     }
+}
+
+fn derive_ws_base(base: &str) -> String {
+    if let Some(rest) = base.strip_prefix("https://") {
+        format!("wss://{rest}")
+    } else if let Some(rest) = base.strip_prefix("http://") {
+        format!("ws://{rest}")
+    } else {
+        base.to_string()
+    }
+}
+
+/// Drain ComfyUI ws frames until the given `prompt_id` terminates. Returns
+/// `Ok(())` on successful completion (`executing` with `node:null`) and
+/// `Err` on `execution_error` or if the stream closes first. Events for
+/// other prompt ids are ignored.
+pub async fn await_completion(ws: &mut ComfyWs, prompt_id: &str) -> anyhow::Result<()> {
+    while let Some(frame) = ws.next().await {
+        let msg = frame.map_err(|e| anyhow::anyhow!("comfy ws error: {e}"))?;
+        let text = match msg {
+            Message::Text(t) => t,
+            Message::Close(_) => anyhow::bail!("comfy ws closed before completion"),
+            _ => continue,
+        };
+        let Ok(v) = serde_json::from_str::<Value>(&text) else {
+            continue;
+        };
+        if v["data"]["prompt_id"].as_str() != Some(prompt_id) {
+            continue;
+        }
+        match v["type"].as_str() {
+            Some("executing") if v["data"]["node"].is_null() => return Ok(()),
+            Some("execution_error") => {
+                let details = v["data"].to_string();
+                anyhow::bail!("comfyui execution_error: {details}");
+            }
+            _ => {}
+        }
+    }
+    anyhow::bail!("comfy ws stream ended before completion")
 }
 
 // ---- /history response types ----
@@ -358,7 +455,7 @@ mod tests {
 
         let client = ComfyClient::new(server.uri()).unwrap();
         let wf = json!({ "9": { "inputs": { "text": "PROMPT_PLACEHOLDER" } } });
-        let pid = client.submit_prompt(&wf).await.unwrap();
+        let pid = client.submit_prompt(&wf, "test-client").await.unwrap();
         assert_eq!(pid, "abc-123");
     }
 
@@ -481,6 +578,85 @@ mod tests {
             .await
             .expect("retry path should recover");
         assert_eq!(name, "zun_final.jpg");
+    }
+
+    // ---- ws helpers ----
+
+    use futures_util::SinkExt;
+    use tokio::net::TcpListener;
+    use tokio_tungstenite::accept_async;
+
+    /// Start a ws server on 127.0.0.1:<ephemeral> that accepts one
+    /// connection, sends each frame in `frames`, then closes. Returns the
+    /// `ws://` URL the client should connect to.
+    async fn start_ws_server(frames: Vec<String>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = accept_async(stream).await.unwrap();
+            for f in frames {
+                ws.send(Message::text(f)).await.unwrap();
+            }
+            let _ = ws.close(None).await;
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn await_completion_returns_on_executing_node_null() {
+        let frames = vec![
+            // An event for a different prompt id — should be ignored.
+            r#"{"type":"executing","data":{"node":"1","prompt_id":"other"}}"#.to_string(),
+            // Progress/status without prompt_id — should be ignored.
+            r#"{"type":"status","data":{"status":{"exec_info":{"queue_remaining":1}}}}"#
+                .to_string(),
+            // Mid-execution for our prompt — not terminal yet.
+            r#"{"type":"executing","data":{"node":"3","prompt_id":"mine"}}"#.to_string(),
+            // Terminal event for our prompt.
+            r#"{"type":"executing","data":{"node":null,"prompt_id":"mine"}}"#.to_string(),
+        ];
+        let base = start_ws_server(frames).await;
+        let client = ComfyClient::new(&base).unwrap();
+        let mut ws = client.connect_ws("test-client").await.unwrap();
+        await_completion(&mut ws, "mine").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn await_completion_errors_on_execution_error() {
+        let frames = vec![
+            r#"{"type":"execution_error","data":{"prompt_id":"mine","exception_message":"boom"}}"#
+                .to_string(),
+        ];
+        let base = start_ws_server(frames).await;
+        let client = ComfyClient::new(&base).unwrap();
+        let mut ws = client.connect_ws("test-client").await.unwrap();
+        let err = await_completion(&mut ws, "mine").await.unwrap_err();
+        assert!(format!("{err}").contains("execution_error"));
+    }
+
+    #[tokio::test]
+    async fn await_completion_errors_on_stream_close_before_terminal() {
+        let frames =
+            vec![r#"{"type":"executing","data":{"node":"1","prompt_id":"mine"}}"#.to_string()];
+        let base = start_ws_server(frames).await;
+        let client = ComfyClient::new(&base).unwrap();
+        let mut ws = client.connect_ws("test-client").await.unwrap();
+        let err = await_completion(&mut ws, "mine").await.unwrap_err();
+        let s = format!("{err}");
+        assert!(s.contains("closed") || s.contains("ended"), "got: {s}");
+    }
+
+    #[test]
+    fn derive_ws_base_swaps_scheme() {
+        assert_eq!(
+            derive_ws_base("http://127.0.0.1:8188"),
+            "ws://127.0.0.1:8188"
+        );
+        assert_eq!(
+            derive_ws_base("https://example.com:8188"),
+            "wss://example.com:8188"
+        );
     }
 
     #[tokio::test]
