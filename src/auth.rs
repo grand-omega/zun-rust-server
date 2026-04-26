@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     net::{IpAddr, SocketAddr},
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -11,6 +11,7 @@ use axum::{
     middleware::Next,
     response::Response,
 };
+use parking_lot::Mutex;
 use subtle::ConstantTimeEq;
 
 use crate::{AppError, AppState, state::UserId};
@@ -67,13 +68,13 @@ impl AuthLimiter {
     }
 
     fn check_blocked(&self, ip: IpAddr) -> bool {
-        let mut guard = self.inner.lock().expect("auth limiter poisoned");
+        let mut guard = self.inner.lock();
         let entry = guard.entry(ip).or_default();
         entry.is_blocked(Instant::now())
     }
 
     fn record_failure(&self, ip: IpAddr) -> u32 {
-        let mut guard = self.inner.lock().expect("auth limiter poisoned");
+        let mut guard = self.inner.lock();
         let entry = guard.entry(ip).or_default();
         entry.record_failure(Instant::now());
         entry.failures
@@ -176,7 +177,7 @@ mod tests {
         // Forcibly age the window start so the sliding window elapses,
         // then the next check should clear and unblock.
         {
-            let mut guard = limiter.inner.lock().unwrap();
+            let mut guard = limiter.inner.lock();
             let entry = guard.get_mut(&ip).unwrap();
             entry.window_start = Some(Instant::now() - (WINDOW + Duration::from_secs(1)));
         }

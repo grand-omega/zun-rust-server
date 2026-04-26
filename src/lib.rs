@@ -137,7 +137,7 @@ const DISK_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 
 async fn compute_or_reuse_disk_usage(state: &AppState) -> Option<u64> {
     {
-        let guard = state.disk_usage_cache.lock().expect("disk cache poisoned");
+        let guard = state.disk_usage_cache.lock();
         if let Some(sample) = *guard
             && sample.computed_at.elapsed() < DISK_CACHE_TTL
         {
@@ -148,7 +148,7 @@ async fn compute_or_reuse_disk_usage(state: &AppState) -> Option<u64> {
     let total = tokio::task::spawn_blocking(move || dir_size(&dir).unwrap_or(0))
         .await
         .ok()?;
-    let mut guard = state.disk_usage_cache.lock().expect("disk cache poisoned");
+    let mut guard = state.disk_usage_cache.lock();
     *guard = Some(state::DiskUsageSample {
         total_bytes: total,
         computed_at: std::time::Instant::now(),

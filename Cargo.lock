@@ -3824,6 +3824,7 @@ dependencies = [
  "futures-util",
  "http-body-util",
  "image",
+ "parking_lot",
  "rand 0.10.1",
  "reqwest",
  "serde",

@@ -1,8 +1,6 @@
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-};
+use std::{collections::HashMap, sync::Arc};
 
+use parking_lot::Mutex;
 use sqlx::SqlitePool;
 use tokio::sync::mpsc;
 

@@ -40,6 +40,7 @@ pub async fn test_app_with_comfy_and_ws(comfy_url: &str, ws_url: &str) -> TestAp
 
     let config = Config {
         data_dir: tempdir.path().to_path_buf(),
+        workflows_dir: None,
         bind: "127.0.0.1:0".into(),
         token: TEST_TOKEN.to_string(),
         comfy_url: comfy_url.to_string(),
@@ -56,7 +57,7 @@ pub async fn test_app_with_comfy_and_ws(comfy_url: &str, ws_url: &str) -> TestAp
         comfy_health: comfy_monitor::new_handle(),
         worker_tx,
         auth_limiter: AuthLimiter::new(),
-        disk_usage_cache: Arc::new(std::sync::Mutex::new(None)),
+        disk_usage_cache: Arc::new(parking_lot::Mutex::new(None)),
     };
     TestApp {
         router: router(state.clone()),
