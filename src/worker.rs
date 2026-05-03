@@ -12,7 +12,7 @@
 //!
 //! Concurrency: exactly one job at a time. FLUX2 saturates the GPU.
 
-use std::time::Duration;
+use std::{process::Stdio, time::Duration};
 
 use sqlx::SqlitePool;
 use tokio::{
@@ -249,6 +249,7 @@ async fn process_job(state: &AppState, job: &QueuedJob) -> anyhow::Result<()> {
             &input_abs,
             &input_rel,
             input_original_name.as_deref(),
+            timeout_seconds,
             started_at,
         )
         .await;
@@ -351,6 +352,7 @@ async fn process_flux2_klein_9b_kv_diffusers(
     input_abs: &std::path::Path,
     input_rel: &str,
     input_original_name: Option<&str>,
+    timeout_seconds: u64,
     started_at: std::time::Instant,
 ) -> anyhow::Result<()> {
     const STEPS: u32 = 4;
@@ -400,7 +402,11 @@ async fn process_flux2_klein_9b_kv_diffusers(
         height = HEIGHT,
     );
 
-    let output = Command::new("uv")
+    // Spawn (not output()) so we own the Child and can bound it with a
+    // timeout. kill_on_drop sends SIGKILL if the timeout future is dropped
+    // before the wait future resolves — without this, a hung python runner
+    // wedges the worker forever.
+    let child = Command::new("uv")
         .current_dir(&project_root)
         .arg("run")
         .arg("python")
@@ -419,8 +425,20 @@ async fn process_flux2_klein_9b_kv_diffusers(
         .arg(HEIGHT.to_string())
         .arg("--width")
         .arg(WIDTH.to_string())
-        .output()
-        .await?;
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()?;
+
+    let output = match tokio::time::timeout(
+        Duration::from_secs(timeout_seconds),
+        child.wait_with_output(),
+    )
+    .await
+    {
+        Ok(res) => res?,
+        Err(_) => anyhow::bail!("Diffusers 9B-KV runner timed out after {timeout_seconds}s"),
+    };
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
