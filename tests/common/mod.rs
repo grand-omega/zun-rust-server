@@ -10,7 +10,7 @@ use tempfile::TempDir;
 use tokio::sync::{mpsc, watch};
 use zun_rust_server::{
     AppState, Config, auth::AuthLimiter, comfy::ComfyClient, comfy_monitor, db, hash, router,
-    state::UserId, worker,
+    state::UserId, worker, workflow,
 };
 
 pub const TEST_TOKEN: &str = "test-token-0123456789abcdef";
@@ -41,6 +41,7 @@ pub async fn test_app_with_comfy_and_ws(comfy_url: &str, ws_url: &str) -> TestAp
     let config = Config {
         data_dir: tempdir.path().to_path_buf(),
         workflows_dir: None,
+        diffusers_model_path: None,
         bind: "127.0.0.1:0".into(),
         token: TEST_TOKEN.to_string(),
         comfy_url: comfy_url.to_string(),
@@ -52,7 +53,7 @@ pub async fn test_app_with_comfy_and_ws(comfy_url: &str, ws_url: &str) -> TestAp
     let state = AppState {
         db: pool.clone(),
         config,
-        workflows: Arc::new(std::collections::HashMap::new()),
+        workflows: Arc::new(workflow::WorkflowRegistry::empty()),
         comfy,
         comfy_health: comfy_monitor::new_handle(),
         worker_tx,
@@ -98,11 +99,22 @@ pub fn spawn_worker_with_shutdown(
 
 #[allow(dead_code)]
 pub fn seed_workflow(app: &mut TestApp, stem: &str, template: serde_json::Value) {
-    let mut map = (*app.state.workflows).clone();
-    map.insert(stem.to_string(), template);
-    let arc = Arc::new(map);
+    let mut templates = app.state.workflows.templates.clone();
+    templates.insert(stem.to_string(), template);
+    let support = workflow::analyze_templates(&templates);
+    let arc = Arc::new(workflow::WorkflowRegistry { templates, support });
     app.state.workflows = arc.clone();
     app.router = router(app.state.clone());
+}
+
+#[allow(dead_code)]
+pub fn supported_edit_workflow() -> serde_json::Value {
+    serde_json::json!({
+        "4": { "inputs": { "image": "INPUT_IMAGE_PLACEHOLDER" }, "class_type": "LoadImage" },
+        "9": { "inputs": { "text": "PROMPT_PLACEHOLDER" }, "class_type": "CLIPTextEncode" },
+        "16": { "inputs": { "noise_seed": "SEED_PLACEHOLDER" }, "class_type": "RandomNoise" },
+        "19": { "inputs": { "filename_prefix": "FILENAME_PREFIX_PLACEHOLDER" }, "class_type": "SaveImage" }
+    })
 }
 
 /// Insert a custom_prompts row for the test user. Returns the new id.

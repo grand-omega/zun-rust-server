@@ -31,7 +31,7 @@ fn submit_request(content_type: &str, body: Vec<u8>) -> Request<Body> {
 }
 
 async fn seed_test_prompt(app: &mut common::TestApp) -> i64 {
-    common::seed_workflow(app, "flux2_klein_edit", serde_json::json!({}));
+    common::seed_workflow(app, "flux2_klein_edit", common::supported_edit_workflow());
     common::seed_prompt(&app.db, "Test", "test prompt", "flux2_klein_edit").await
 }
 
@@ -244,7 +244,11 @@ async fn submit_with_prompt_text_requires_workflow() {
 #[tokio::test]
 async fn submit_prompt_text_with_workflow_works() {
     let mut app = common::test_app().await;
-    common::seed_workflow(&mut app, "flux2_klein_edit", serde_json::json!({}));
+    common::seed_workflow(
+        &mut app,
+        "flux2_klein_edit",
+        common::supported_edit_workflow(),
+    );
     let img = b"yyy";
     let (ct, body) = common::multipart_submit(
         img,
@@ -252,6 +256,21 @@ async fn submit_prompt_text_with_workflow_works() {
         None,
         Some("free text"),
         Some("flux2_klein_edit"),
+    );
+    let resp = app.router.oneshot(submit_request(&ct, body)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+}
+
+#[tokio::test]
+async fn submit_prompt_text_with_9b_kv_experimental_model_works() {
+    let app = common::test_app().await;
+    let img = b"yyy";
+    let (ct, body) = common::multipart_submit(
+        img,
+        "image/jpeg",
+        None,
+        Some("free text"),
+        Some("flux2_klein_9b_kv_experimental"),
     );
     let resp = app.router.oneshot(submit_request(&ct, body)).await.unwrap();
     assert_eq!(resp.status(), StatusCode::ACCEPTED);

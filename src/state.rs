@@ -1,10 +1,13 @@
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use parking_lot::Mutex;
 use sqlx::SqlitePool;
 use tokio::sync::mpsc;
 
-use crate::{Config, auth::AuthLimiter, comfy::ComfyClient, comfy_monitor::ComfyHealthHandle};
+use crate::{
+    Config, auth::AuthLimiter, comfy::ComfyClient, comfy_monitor::ComfyHealthHandle,
+    workflow::WorkflowRegistry,
+};
 
 /// Identifies which user owns a row. Mandatory parameter on every
 /// data-access function so cross-user access is unrepresentable in code.
@@ -15,9 +18,9 @@ pub struct UserId(pub i64);
 pub struct AppState {
     pub db: SqlitePool,
     pub config: Config,
-    /// Workflow templates loaded from `data/workflows/*.json`. Shared
-    /// across users — admin-curated.
-    pub workflows: Arc<HashMap<String, serde_json::Value>>,
+    /// Workflow templates plus server support status. Shared across users
+    /// and admin-curated from `data/workflows/*.json`.
+    pub workflows: Arc<WorkflowRegistry>,
     pub comfy: ComfyClient,
     /// Latest known ComfyUI reachability; updated by the monitor task,
     /// read by `/api/v1/health`.

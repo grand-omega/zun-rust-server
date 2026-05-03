@@ -237,11 +237,10 @@ async fn resolve_prompt(
             .await?;
             let (_text, workflow, timeout) =
                 row.ok_or_else(|| AppError::BadRequest(format!("unknown prompt_id: {pid}")))?;
-            if !state.workflows.contains_key(&workflow) {
-                return Err(AppError::BadRequest(format!(
-                    "prompt's workflow '{workflow}' is not loaded"
-                )));
-            }
+            state
+                .workflows
+                .supports(&workflow)
+                .map_err(|e| AppError::BadRequest(e.to_string()))?;
             // jobs.prompt_text stays null when prompt_id is set; the worker
             // dereferences `text` from the prompt row at job-run time.
             Ok((
@@ -257,13 +256,18 @@ async fn resolve_prompt(
             let workflow = fields.workflow_override.as_deref().ok_or_else(|| {
                 AppError::BadRequest("workflow field required when prompt_text is set".into())
             })?;
-            if !state.workflows.contains_key(workflow) {
-                return Err(AppError::BadRequest(format!(
-                    "unknown workflow: {workflow}"
-                )));
-            }
+            state
+                .workflows
+                .supports(workflow)
+                .map_err(|e| AppError::BadRequest(e.to_string()))?;
             if text.trim().is_empty() {
                 return Err(AppError::BadRequest("prompt_text must be non-empty".into()));
+            }
+            if text.len() > crate::MAX_PROMPT_LEN {
+                return Err(AppError::BadRequest(format!(
+                    "prompt_text must be at most {} bytes",
+                    crate::MAX_PROMPT_LEN
+                )));
             }
             Ok((
                 workflow.to_string(),
@@ -349,7 +353,7 @@ async fn resolve_input(
             if let Some(parent) = abs.parent() {
                 tokio::fs::create_dir_all(parent).await?;
             }
-            tokio::fs::write(&abs, &upload.bytes).await?;
+            paths::atomic_write(&abs, &upload.bytes).await?;
 
             // Read dimensions best-effort; non-fatal.
             let bytes_for_dim = upload.bytes.clone();
@@ -552,6 +556,7 @@ struct JobFullRow {
     completed_at: Option<i64>,
     width: Option<i64>,
     height: Option<i64>,
+    output_path: Option<String>,
 }
 
 pub async fn get_job(
@@ -561,7 +566,7 @@ pub async fn get_job(
 ) -> Result<Json<serde_json::Value>, AppError> {
     let row: JobFullRow = sqlx::query_as(
         "SELECT id, input_id, prompt_id, prompt_text, workflow, seed, status, \
-         error_message, created_at, started_at, completed_at, width, height \
+         error_message, created_at, started_at, completed_at, width, height, output_path \
          FROM jobs WHERE id = ? AND user_id = ? AND deleted_at IS NULL",
     )
     .bind(&job_id)
@@ -569,6 +574,8 @@ pub async fn get_job(
     .fetch_optional(&state.db)
     .await?
     .ok_or(AppError::NotFound)?;
+
+    let sidecar_metadata = read_output_sidecar_metadata(&state, &row).await;
 
     Ok(Json(json!({
         "id": row.id,
@@ -584,7 +591,22 @@ pub async fn get_job(
         "completed_at": row.completed_at,
         "width": row.width,
         "height": row.height,
+        "metadata": sidecar_metadata,
     })))
+}
+
+async fn read_output_sidecar_metadata(
+    state: &AppState,
+    row: &JobFullRow,
+) -> Option<serde_json::Value> {
+    let output_path = row.output_path.as_ref()?;
+    let sidecar = state
+        .config
+        .data_dir
+        .join(output_path)
+        .with_extension("json");
+    let raw = tokio::fs::read(&sidecar).await.ok()?;
+    serde_json::from_slice(&raw).ok()
 }
 
 // ---------- DELETE /api/v1/jobs/{id} (soft) + restore --------------------

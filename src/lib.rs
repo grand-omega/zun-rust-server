@@ -42,6 +42,11 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Multipart upload cap for POST /api/v1/jobs.
 pub(crate) const MAX_UPLOAD_BYTES: usize = 20 * 1024 * 1024;
 
+/// Cap on user-supplied prompt text (free-form `prompt_text` and stored
+/// `custom_prompts.text`). Generous for natural-language prompts, but
+/// keeps the DB and audit logs from absorbing accidental bulk uploads.
+pub(crate) const MAX_PROMPT_LEN: usize = 8 * 1024;
+
 /// Default per-job timeout for the ComfyUI poll loop. Overridable per
 /// custom_prompts row via `timeout_seconds`.
 pub const DEFAULT_TIMEOUT_SECONDS: u64 = 60;
@@ -78,6 +83,8 @@ pub fn router(state: AppState) -> Router {
         // Inputs (read-only)
         .route("/api/v1/inputs/{id}", get(inputs::get_input))
         .route("/api/v1/inputs/{id}/file", get(inputs::get_input_file))
+        // Server/GPU backend capability report.
+        .route("/api/v1/capabilities", get(capabilities))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_bearer,
@@ -112,6 +119,28 @@ pub fn router(state: AppState) -> Router {
             )
             .layer(PropagateRequestIdLayer::x_request_id()),
     )
+}
+
+async fn capabilities(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let h = state.comfy_health.read().await;
+    let workflows = state.workflows.support_list();
+    Json(json!({
+        "version": VERSION,
+        "comfy": {
+            "reachable": h.is_healthy(),
+            "last_ok_at": h.last_ok_at,
+            "consecutive_failures": h.consecutive_failures,
+        },
+        "features": {
+            "image_edit": state.workflows.supported_count() > 0,
+            "auto_mask": false,
+            "lora": false,
+            "reference_image": false,
+            "manual_mask": false,
+            "text_to_image": false,
+        },
+        "workflows": workflows,
+    }))
 }
 
 /// Liveness + ComfyUI reachability + cached disk usage. Unauthenticated —

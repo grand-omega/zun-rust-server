@@ -3,6 +3,7 @@
 //! Subcommands:
 //!   seed-prompts <username> --from <toml>   Insert prompt rows for a user.
 //!   purge --dry-run                         Run/preview cache + soft-delete purge.
+//!   check-comfy                              Check ComfyUI reachability + workflows.
 
 use std::path::PathBuf;
 
@@ -37,6 +38,8 @@ enum Cmd {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Check ComfyUI reachability and workflow support status.
+    CheckComfy,
     /// User management.
     User {
         #[command(subcommand)]
@@ -92,12 +95,21 @@ struct PromptSeed {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let config = zun_rust_server::Config::from_file(&cli.config)?;
-    let pool = open_pool(&config.data_dir).await?;
 
     match cli.cmd {
-        Cmd::SeedPrompts { username, from } => seed_prompts(&pool, &username, &from).await,
-        Cmd::Purge { dry_run } => purge(&pool, &config, dry_run).await,
-        Cmd::User { cmd } => user(&pool, &config, cmd).await,
+        Cmd::CheckComfy => check_comfy(&config).await,
+        Cmd::SeedPrompts { username, from } => {
+            let pool = open_pool(&config.data_dir).await?;
+            seed_prompts(&pool, &config, &username, &from).await
+        }
+        Cmd::Purge { dry_run } => {
+            let pool = open_pool(&config.data_dir).await?;
+            purge(&pool, &config, dry_run).await
+        }
+        Cmd::User { cmd } => {
+            let pool = open_pool(&config.data_dir).await?;
+            user(&pool, &config, cmd).await
+        }
     }
 }
 
@@ -117,6 +129,7 @@ async fn open_pool(data_dir: &std::path::Path) -> anyhow::Result<SqlitePool> {
 
 async fn seed_prompts(
     pool: &SqlitePool,
+    config: &zun_rust_server::Config,
     username: &str,
     from: &std::path::Path,
 ) -> anyhow::Result<()> {
@@ -128,10 +141,14 @@ async fn seed_prompts(
 
     let raw = std::fs::read_to_string(from)?;
     let parsed: PromptsFile = toml::from_str(&raw)?;
+    let registry = zun_rust_server::workflow::load_registry(&config.resolved_workflows_dir())?;
     let now = chrono::Utc::now().timestamp();
 
     let mut inserted = 0usize;
     for p in parsed.prompts {
+        registry
+            .supports(&p.workflow)
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
         sqlx::query(
             "INSERT INTO custom_prompts \
              (user_id, label, description, text, workflow, timeout_seconds, created_at, updated_at) \
@@ -173,6 +190,29 @@ async fn purge(
         report.inputs_purged,
         report.input_files_removed,
     );
+    Ok(())
+}
+
+async fn check_comfy(config: &zun_rust_server::Config) -> anyhow::Result<()> {
+    let workflows_dir = config.resolved_workflows_dir();
+    let registry = zun_rust_server::workflow::load_registry(&workflows_dir)?;
+    println!(
+        "workflows: {} loaded, {} supported ({})",
+        registry.templates.len(),
+        registry.supported_count(),
+        workflows_dir.display()
+    );
+    for wf in registry.support_list() {
+        let status = if wf.supported { "OK" } else { "DISABLED" };
+        let reason = wf.reason.unwrap_or_else(|| "supported".into());
+        println!("{status:<8} {:<32} {reason}", wf.name);
+    }
+
+    let comfy = zun_rust_server::comfy::ComfyClient::new(&config.comfy_url)?;
+    match comfy.health().await {
+        Ok(()) => println!("comfy: reachable ({})", config.comfy_url),
+        Err(e) => println!("comfy: unreachable ({}) - {e}", config.comfy_url),
+    }
     Ok(())
 }
 
@@ -305,14 +345,13 @@ async fn build_state(
     pool: &SqlitePool,
     config: &zun_rust_server::Config,
 ) -> anyhow::Result<zun_rust_server::AppState> {
-    use std::collections::HashMap;
     use std::sync::Arc;
     let comfy = zun_rust_server::comfy::ComfyClient::new(&config.comfy_url)?;
     let (worker_tx, _worker_rx) = tokio::sync::mpsc::channel::<()>(1);
     Ok(zun_rust_server::AppState {
         db: pool.clone(),
         config: config.clone(),
-        workflows: Arc::new(HashMap::new()),
+        workflows: Arc::new(zun_rust_server::workflow::WorkflowRegistry::empty()),
         comfy,
         comfy_health: zun_rust_server::comfy_monitor::new_handle(),
         worker_tx,

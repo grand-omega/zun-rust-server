@@ -15,6 +15,11 @@ pub struct Config {
     /// Defaults to `<data_dir>/workflows` when unset.
     #[serde(default)]
     pub workflows_dir: Option<PathBuf>,
+    /// On-disk path to the FLUX2 9B-KV weights, recorded in audit logs and
+    /// the per-job sidecar metadata. Required when the experimental
+    /// virtual workflow is used; otherwise ignored.
+    #[serde(default)]
+    pub diffusers_model_path: Option<PathBuf>,
     #[serde(default)]
     pub log_format: LogFormat,
 }

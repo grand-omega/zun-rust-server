@@ -24,5 +24,10 @@ data_dir = "./data"
 # a different host or path than this server's data_dir.
 # workflows_dir = "/path/to/project-zun/workflows"
 
+# On-disk path to the FLUX2 9B-KV weights. Required only when the
+# `flux2_klein_9b_kv_experimental` virtual workflow is used; recorded in
+# audit logs and per-job sidecar metadata.
+# diffusers_model_path = "/path/to/flux2-klein-9b-kv"
+
 # Log format: "auto" (pretty on TTY, JSON otherwise), "pretty", or "json".
 log_format = "auto"

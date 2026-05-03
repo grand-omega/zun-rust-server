@@ -22,9 +22,10 @@ async fn main() -> anyhow::Result<()> {
     let pool = db::init(&config.data_dir).await?;
 
     let workflows_dir = config.resolved_workflows_dir();
-    let workflows = workflow::load_templates(&workflows_dir)?;
+    let workflows = workflow::load_registry(&workflows_dir)?;
     tracing::info!(
-        n = workflows.len(),
+        n = workflows.templates.len(),
+        supported = workflows.supported_count(),
         dir = %workflows_dir.display(),
         "workflow templates loaded"
     );

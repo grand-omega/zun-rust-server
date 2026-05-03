@@ -48,12 +48,10 @@ pub struct UpdatePrompt {
 }
 
 fn validate_workflow(state: &AppState, workflow: &str) -> Result<(), AppError> {
-    if !state.workflows.contains_key(workflow) {
-        return Err(AppError::BadRequest(format!(
-            "unknown workflow: {workflow}"
-        )));
-    }
-    Ok(())
+    state
+        .workflows
+        .supports(workflow)
+        .map_err(|e| AppError::BadRequest(e.to_string()))
 }
 
 pub async fn create(
@@ -66,6 +64,12 @@ pub async fn create(
     }
     if body.text.trim().is_empty() {
         return Err(AppError::BadRequest("text must be non-empty".into()));
+    }
+    if body.text.len() > crate::MAX_PROMPT_LEN {
+        return Err(AppError::BadRequest(format!(
+            "text must be at most {} bytes",
+            crate::MAX_PROMPT_LEN
+        )));
     }
     validate_workflow(&state, &body.workflow)?;
 
@@ -136,6 +140,12 @@ pub async fn update(
     if let Some(text) = body.text {
         if text.trim().is_empty() {
             return Err(AppError::BadRequest("text must be non-empty".into()));
+        }
+        if text.len() > crate::MAX_PROMPT_LEN {
+            return Err(AppError::BadRequest(format!(
+                "text must be at most {} bytes",
+                crate::MAX_PROMPT_LEN
+            )));
         }
         current.text = text;
     }
