@@ -38,6 +38,11 @@ pub async fn test_app_with_comfy_and_ws(comfy_url: &str, ws_url: &str) -> TestAp
     let config = Config {
         data_dir: tempdir.path().to_path_buf(),
         workflows_dir: None,
+        default_workflow: "flux2_klein_edit".into(),
+        enabled_workflows: vec![
+            "flux2_klein_edit".into(),
+            "flux2_klein_9b_kv_experimental".into(),
+        ],
         diffusers_model_path: None,
         bind: "127.0.0.1:0".into(),
         token: TEST_TOKEN.to_string(),
@@ -98,7 +103,7 @@ pub fn spawn_worker_with_shutdown(
 pub fn seed_workflow(app: &mut TestApp, stem: &str, template: serde_json::Value) {
     let mut templates = app.state.workflows.templates.clone();
     templates.insert(stem.to_string(), template);
-    let support = workflow::analyze_templates(&templates);
+    let support = workflow::support_for_templates(&templates, "flux2_klein_edit");
     let arc = Arc::new(workflow::WorkflowRegistry { templates, support });
     app.state.workflows = arc.clone();
     app.router = router(app.state.clone());

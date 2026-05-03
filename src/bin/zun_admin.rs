@@ -95,7 +95,11 @@ async fn seed_prompts(
 ) -> anyhow::Result<()> {
     let raw = std::fs::read_to_string(from)?;
     let parsed: PromptsFile = toml::from_str(&raw)?;
-    let registry = zun_rust_server::workflow::load_registry(&config.resolved_workflows_dir())?;
+    let registry = zun_rust_server::workflow::load_registry(
+        &config.resolved_workflows_dir(),
+        &config.enabled_workflows,
+        &config.default_workflow,
+    )?;
     let now = chrono::Utc::now().timestamp();
 
     let mut inserted = 0usize;
@@ -148,7 +152,11 @@ async fn purge(
 
 async fn check_comfy(config: &zun_rust_server::Config) -> anyhow::Result<()> {
     let workflows_dir = config.resolved_workflows_dir();
-    let registry = zun_rust_server::workflow::load_registry(&workflows_dir)?;
+    let registry = zun_rust_server::workflow::load_registry(
+        &workflows_dir,
+        &config.enabled_workflows,
+        &config.default_workflow,
+    )?;
     println!(
         "workflows: {} loaded, {} supported ({})",
         registry.templates.len(),

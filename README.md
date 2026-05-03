@@ -37,6 +37,8 @@ All config lives in `config.toml` (gitignored). Copy from `config.example.toml`:
 | `bind` | `0.0.0.0:8080` | Listen address — works on LAN and Tailscale simultaneously |
 | `comfy_url` | `http://127.0.0.1:8188` | ComfyUI HTTP base |
 | `data_dir` | `./data` | Houses `jobs.db`, `{cache,outputs,thumbs,previews}/`, and the `workflows/` symlink |
+| `default_workflow` | `flux2_klein_edit` | Default workflow advertised to Android |
+| `enabled_workflows` | `flux2_klein_edit`, `flux2_klein_9b_kv_experimental` | Explicit workflow names exposed by the server |
 | `log_format` | `auto` | `auto` (pretty on TTY, JSON otherwise), `pretty`, or `json` |
 
 `RUST_LOG` env var still works for log-level tuning (e.g. `RUST_LOG=debug`).
