@@ -15,6 +15,17 @@ pub struct Config {
     /// Defaults to `<data_dir>/workflows` when unset.
     #[serde(default)]
     pub workflows_dir: Option<PathBuf>,
+    /// Workflow selected by default in capability responses.
+    #[serde(default = "default_workflow")]
+    pub default_workflow: String,
+    /// Explicit list of workflow names this server exposes.
+    #[serde(default = "default_enabled_workflows")]
+    pub enabled_workflows: Vec<String>,
+    /// On-disk path to the FLUX2 9B-KV weights, recorded in audit logs and
+    /// the per-job sidecar metadata. Required when the experimental
+    /// virtual workflow is used; otherwise ignored.
+    #[serde(default)]
+    pub diffusers_model_path: Option<PathBuf>,
     #[serde(default)]
     pub log_format: LogFormat,
 }
@@ -27,6 +38,15 @@ fn default_comfy_url() -> String {
 }
 fn default_data_dir() -> PathBuf {
     PathBuf::from("./data")
+}
+fn default_workflow() -> String {
+    "flux2_klein_edit".into()
+}
+fn default_enabled_workflows() -> Vec<String> {
+    vec![
+        "flux2_klein_edit".into(),
+        "flux2_klein_9b_kv_experimental".into(),
+    ]
 }
 
 /// Log output format. Defaults to `auto` (pretty when stderr is a TTY, JSON otherwise).

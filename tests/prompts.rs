@@ -34,7 +34,11 @@ fn authed_json(method: &'static str, uri: &str, body: serde_json::Value) -> Requ
 
 async fn app_with_workflow() -> common::TestApp {
     let mut app = common::test_app().await;
-    common::seed_workflow(&mut app, "flux2_klein_edit", json!({}));
+    common::seed_workflow(
+        &mut app,
+        "flux2_klein_edit",
+        common::supported_edit_workflow(),
+    );
     app
 }
 
@@ -169,6 +173,32 @@ async fn create_with_unknown_workflow_is_400() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn create_with_not_enabled_workflow_is_400() {
+    let app = common::test_app().await;
+    let resp = app
+        .router
+        .oneshot(authed_json(
+            "POST",
+            "/api/v1/prompts",
+            json!({
+                "label": "x",
+                "text": "y",
+                "workflow": "flux_fill_auto_mask",
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = body_json(resp).await;
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("unknown workflow: flux_fill_auto_mask")
+    );
 }
 
 #[tokio::test]

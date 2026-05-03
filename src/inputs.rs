@@ -3,14 +3,14 @@
 //! not user-curated.
 
 use axum::{
-    Extension, Json,
+    Json,
     extract::{Path, Request, State},
     http::StatusCode,
     response::Response,
 };
 use serde_json::json;
 
-use crate::{AppError, AppState, images, state::UserId};
+use crate::{AppError, AppState, images};
 
 #[derive(sqlx::FromRow)]
 struct InputRow {
@@ -28,16 +28,14 @@ struct InputRow {
 
 pub async fn get_input(
     State(state): State<AppState>,
-    Extension(user): Extension<UserId>,
     Path(id): Path<i64>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let row: InputRow = sqlx::query_as(
         "SELECT id, sha256, path, original_name, content_type, size_bytes, \
          width, height, created_at, last_used_at \
-         FROM inputs WHERE id = ? AND user_id = ?",
+         FROM inputs WHERE id = ?",
     )
     .bind(id)
-    .bind(user.0)
     .fetch_optional(&state.db)
     .await?
     .ok_or(AppError::NotFound)?;
@@ -58,14 +56,12 @@ pub async fn get_input(
 
 pub async fn get_input_file(
     State(state): State<AppState>,
-    Extension(user): Extension<UserId>,
     Path(id): Path<i64>,
     req: Request,
 ) -> Result<Response, AppError> {
     let row: Option<(Option<String>, Option<String>)> =
-        sqlx::query_as("SELECT path, content_type FROM inputs WHERE id = ? AND user_id = ?")
+        sqlx::query_as("SELECT path, content_type FROM inputs WHERE id = ?")
             .bind(id)
-            .bind(user.0)
             .fetch_optional(&state.db)
             .await?;
     let (path, content_type) = row.ok_or(AppError::NotFound)?;

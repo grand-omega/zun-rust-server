@@ -10,13 +10,10 @@ use tempfile::TempDir;
 use tokio::sync::{mpsc, watch};
 use zun_rust_server::{
     AppState, Config, auth::AuthLimiter, comfy::ComfyClient, comfy_monitor, db, hash, router,
-    state::UserId, worker,
+    worker, workflow,
 };
 
 pub const TEST_TOKEN: &str = "test-token-0123456789abcdef";
-
-/// User id seeded by `db::init`.
-pub const TEST_USER: UserId = UserId(1);
 
 pub struct TestApp {
     pub router: Router,
@@ -41,6 +38,12 @@ pub async fn test_app_with_comfy_and_ws(comfy_url: &str, ws_url: &str) -> TestAp
     let config = Config {
         data_dir: tempdir.path().to_path_buf(),
         workflows_dir: None,
+        default_workflow: "flux2_klein_edit".into(),
+        enabled_workflows: vec![
+            "flux2_klein_edit".into(),
+            "flux2_klein_9b_kv_experimental".into(),
+        ],
+        diffusers_model_path: None,
         bind: "127.0.0.1:0".into(),
         token: TEST_TOKEN.to_string(),
         comfy_url: comfy_url.to_string(),
@@ -52,7 +55,7 @@ pub async fn test_app_with_comfy_and_ws(comfy_url: &str, ws_url: &str) -> TestAp
     let state = AppState {
         db: pool.clone(),
         config,
-        workflows: Arc::new(std::collections::HashMap::new()),
+        workflows: Arc::new(workflow::WorkflowRegistry::empty()),
         comfy,
         comfy_health: comfy_monitor::new_handle(),
         worker_tx,
@@ -98,22 +101,32 @@ pub fn spawn_worker_with_shutdown(
 
 #[allow(dead_code)]
 pub fn seed_workflow(app: &mut TestApp, stem: &str, template: serde_json::Value) {
-    let mut map = (*app.state.workflows).clone();
-    map.insert(stem.to_string(), template);
-    let arc = Arc::new(map);
+    let mut templates = app.state.workflows.templates.clone();
+    templates.insert(stem.to_string(), template);
+    let support = workflow::support_for_templates(&templates, "flux2_klein_edit");
+    let arc = Arc::new(workflow::WorkflowRegistry { templates, support });
     app.state.workflows = arc.clone();
     app.router = router(app.state.clone());
 }
 
-/// Insert a custom_prompts row for the test user. Returns the new id.
+#[allow(dead_code)]
+pub fn supported_edit_workflow() -> serde_json::Value {
+    serde_json::json!({
+        "4": { "inputs": { "image": "INPUT_IMAGE_PLACEHOLDER" }, "class_type": "LoadImage" },
+        "9": { "inputs": { "text": "PROMPT_PLACEHOLDER" }, "class_type": "CLIPTextEncode" },
+        "16": { "inputs": { "noise_seed": "SEED_PLACEHOLDER" }, "class_type": "RandomNoise" },
+        "19": { "inputs": { "filename_prefix": "FILENAME_PREFIX_PLACEHOLDER" }, "class_type": "SaveImage" }
+    })
+}
+
+/// Insert a custom_prompts row. Returns the new id.
 #[allow(dead_code)]
 pub async fn seed_prompt(db: &SqlitePool, label: &str, text: &str, workflow: &str) -> i64 {
     let now = chrono::Utc::now().timestamp();
     let res = sqlx::query(
-        "INSERT INTO custom_prompts (user_id, label, description, text, workflow, created_at, updated_at) \
-         VALUES (?, ?, NULL, ?, ?, ?, ?)",
+        "INSERT INTO custom_prompts (label, description, text, workflow, created_at, updated_at) \
+         VALUES (?, NULL, ?, ?, ?, ?)",
     )
-    .bind(TEST_USER.0)
     .bind(label)
     .bind(text)
     .bind(workflow)
@@ -135,7 +148,7 @@ pub async fn seed_input(
 ) -> i64 {
     let now = chrono::Utc::now().timestamp();
     let path = if let Some(b) = bytes {
-        let rel = format!("users/1/cache/inputs/{sha256}.jpg");
+        let rel = format!("cache/inputs/{sha256}.jpg");
         let abs = tempdir.join(&rel);
         std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
         std::fs::write(&abs, b).unwrap();
@@ -144,10 +157,9 @@ pub async fn seed_input(
         None
     };
     let res = sqlx::query(
-        "INSERT INTO inputs (user_id, sha256, path, content_type, size_bytes, created_at, last_used_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO inputs (sha256, path, content_type, size_bytes, created_at, last_used_at) \
+         VALUES (?, ?, ?, ?, ?, ?)",
     )
-    .bind(TEST_USER.0)
     .bind(sha256)
     .bind(&path)
     .bind("image/jpeg")
@@ -166,7 +178,7 @@ pub async fn seed_job(
     db: &SqlitePool,
     id: &str,
     status: &str,
-    prompt_id: Option<i64>,
+    source_prompt_id: Option<i64>,
     prompt_text: Option<&str>,
     workflow: &str,
     input_id: i64,
@@ -174,15 +186,15 @@ pub async fn seed_job(
     completed_at: Option<i64>,
 ) {
     sqlx::query(
-        "INSERT INTO jobs (id, user_id, input_id, prompt_id, prompt_text, workflow, seed, status, created_at, completed_at) \
+        "INSERT INTO jobs (id, input_id, source_prompt_id, prompt_text, workflow, timeout_seconds, seed, status, created_at, completed_at) \
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(id)
-    .bind(TEST_USER.0)
     .bind(input_id)
-    .bind(prompt_id)
-    .bind(prompt_text)
+    .bind(source_prompt_id)
+    .bind(prompt_text.unwrap_or("p"))
     .bind(workflow)
+    .bind(zun_rust_server::DEFAULT_TIMEOUT_SECONDS as i64)
     .bind(0_i64)
     .bind(status)
     .bind(created_at)

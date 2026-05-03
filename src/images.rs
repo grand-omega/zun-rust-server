@@ -5,7 +5,6 @@
 use std::path::Path as FsPath;
 
 use axum::{
-    Extension,
     body::Body,
     extract::{Path, Request, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
@@ -17,7 +16,6 @@ use crate::{
     AppError, AppState,
     derived_images::{self, PREVIEW_MAX_EDGE, THUMB_MAX_EDGE},
     paths::subdir,
-    state::UserId,
 };
 
 const CACHE_HEADER: &str = "private, max-age=3600";
@@ -25,16 +23,14 @@ const CACHE_HEADER: &str = "private, max-age=3600";
 /// Serve the full-resolution output. 409 if the job hasn't finished yet.
 pub async fn get_result(
     State(state): State<AppState>,
-    Extension(user): Extension<UserId>,
     Path(job_id): Path<String>,
     req: Request,
 ) -> Result<Response, AppError> {
     let row: (String, Option<String>) = sqlx::query_as(
         "SELECT status, output_path FROM jobs \
-         WHERE id = ? AND user_id = ? AND deleted_at IS NULL",
+         WHERE id = ? AND deleted_at IS NULL",
     )
     .bind(&job_id)
-    .bind(user.0)
     .fetch_optional(&state.db)
     .await?
     .ok_or(AppError::NotFound)?;
@@ -50,13 +46,11 @@ pub async fn get_result(
 /// 400px JPEG. Fast path: cached file. Slow path: lazy generation.
 pub async fn get_thumb(
     state: State<AppState>,
-    user: Extension<UserId>,
     job_id: Path<String>,
     req: Request,
 ) -> Result<Response, AppError> {
     serve_derived(
         state,
-        user,
         job_id,
         req,
         "thumb_path",
@@ -69,13 +63,11 @@ pub async fn get_thumb(
 /// ~1280px JPEG, sized for full-screen phone viewing. Same lazy-fallback story.
 pub async fn get_preview(
     state: State<AppState>,
-    user: Extension<UserId>,
     job_id: Path<String>,
     req: Request,
 ) -> Result<Response, AppError> {
     serve_derived(
         state,
-        user,
         job_id,
         req,
         "preview_path",
@@ -87,7 +79,6 @@ pub async fn get_preview(
 
 async fn serve_derived(
     State(state): State<AppState>,
-    Extension(user): Extension<UserId>,
     Path(job_id): Path<String>,
     req: Request,
     column: &'static str,
@@ -97,11 +88,10 @@ async fn serve_derived(
     // `column` is one of two hardcoded constants — never user input.
     let sql = format!(
         "SELECT status, output_path, {column} FROM jobs \
-         WHERE id = ? AND user_id = ? AND deleted_at IS NULL"
+         WHERE id = ? AND deleted_at IS NULL"
     );
     let row: Option<(String, Option<String>, Option<String>)> = sqlx::query_as(&sql)
         .bind(&job_id)
-        .bind(user.0)
         .fetch_optional(&state.db)
         .await?;
     let (status, output_path, derived_rel) = row.ok_or(AppError::NotFound)?;
@@ -126,7 +116,6 @@ async fn serve_derived(
     let abs = derived_images::ensure_one(
         &state.db,
         &state.config.data_dir,
-        user,
         &job_id,
         &output_abs,
         sub,

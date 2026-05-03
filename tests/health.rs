@@ -7,6 +7,14 @@ use tower::ServiceExt;
 
 mod common;
 
+fn authed_get(uri: &str) -> Request<Body> {
+    Request::builder()
+        .uri(uri)
+        .header("authorization", common::bearer(common::TEST_TOKEN))
+        .body(Body::empty())
+        .unwrap()
+}
+
 #[tokio::test]
 async fn health_returns_ok_and_version() {
     let app = common::test_app().await;
@@ -112,8 +120,60 @@ async fn health_includes_disk_usage_field() {
         .unwrap();
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
     let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    // Field is present even with no users dir yet.
-    assert!(body["disk"]["data_users_bytes"].as_u64().is_some());
+    // Field is present even with no data dir yet.
+    assert!(body["disk"]["data_bytes"].as_u64().is_some());
+}
+
+#[tokio::test]
+async fn capabilities_reports_enabled_workflows() {
+    let mut app = common::test_app().await;
+    common::seed_workflow(
+        &mut app,
+        "flux2_klein_edit",
+        common::supported_edit_workflow(),
+    );
+
+    let resp = app
+        .router
+        .oneshot(authed_get("/api/v1/capabilities"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["features"]["image_edit"], true);
+
+    let workflows = body["workflows"].as_array().unwrap();
+    let supported = workflows
+        .iter()
+        .find(|w| w["name"] == "flux2_klein_edit")
+        .unwrap();
+    assert_eq!(supported["supported"], true);
+    assert_eq!(supported["display_name"], "FLUX 2 klein");
+    assert_eq!(supported["default"], true);
+    let heavy = workflows
+        .iter()
+        .find(|w| w["name"] == "flux2_klein_9b_kv_experimental")
+        .unwrap();
+    assert_eq!(heavy["supported"], true);
+    assert_eq!(heavy["display_name"], "FLUX 2 klein 9B-KV Experimental");
+    assert_eq!(heavy["kind"], "image_edit");
+    assert_eq!(heavy["requires_input_image"], true);
+    assert_eq!(heavy["experimental"], true);
+    assert_eq!(heavy["default"], false);
+    assert_eq!(heavy["runtime"], "diffusers");
+    assert_eq!(heavy["pipeline"], "Flux2KleinKVPipeline");
+    assert_eq!(heavy["model_path"], "/home/doremy/ml/t2i/flux2-klein-9b-kv");
+    assert_eq!(heavy["dtype"], "bfloat16");
+    assert_eq!(heavy["offload_mode"], "sequential");
+    assert_eq!(heavy["default_steps"], 4);
+    assert_eq!(heavy["default_width"], 768);
+    assert_eq!(heavy["default_height"], 1024);
+    assert!(heavy["warning"].as_str().unwrap().contains("16 GB VRAM"));
+    assert!(
+        workflows.iter().all(|w| w["name"] != "flux_fill_auto_mask"),
+        "capabilities should only expose enabled workflows"
+    );
 }
 
 #[tokio::test]
