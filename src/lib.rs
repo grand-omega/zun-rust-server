@@ -157,7 +157,7 @@ async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
             "consecutive_failures": h.consecutive_failures,
         },
         "disk": {
-            "data_users_bytes": disk_bytes,
+            "data_bytes": disk_bytes,
         }
     }))
 }
@@ -173,7 +173,7 @@ async fn compute_or_reuse_disk_usage(state: &AppState) -> Option<u64> {
             return Some(sample.total_bytes);
         }
     }
-    let dir = state.config.data_dir.join("users");
+    let dir = state.config.data_dir.clone();
     let total = tokio::task::spawn_blocking(move || dir_size(&dir).unwrap_or(0))
         .await
         .ok()?;

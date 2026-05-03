@@ -4,7 +4,7 @@ use std::path::Path;
 use std::time::Duration;
 
 /// Initialise the SQLite pool, create the DB file if missing, apply PRAGMAs
-/// per connection, run migrations, and seed the default admin user.
+/// per connection, and run migrations.
 pub async fn init(data_dir: &Path) -> anyhow::Result<SqlitePool> {
     std::fs::create_dir_all(data_dir)?;
     let db_path = data_dir.join("jobs.db");
@@ -23,20 +23,5 @@ pub async fn init(data_dir: &Path) -> anyhow::Result<SqlitePool> {
         .await?;
 
     sqlx::migrate!("./migrations").run(&pool).await?;
-    seed_default_user(&pool).await?;
     Ok(pool)
-}
-
-/// Idempotently seed user id=1 ("admin"). The single-user world only ever
-/// references this row; multi-user is a future v3 concern.
-async fn seed_default_user(pool: &SqlitePool) -> anyhow::Result<()> {
-    let now = chrono::Utc::now().timestamp();
-    sqlx::query(
-        "INSERT OR IGNORE INTO users (id, username, display_name, created_at) \
-         VALUES (1, 'admin', 'admin', ?)",
-    )
-    .bind(now)
-    .execute(pool)
-    .await?;
-    Ok(())
 }

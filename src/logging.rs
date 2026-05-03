@@ -1,6 +1,6 @@
 //! Logging setup.
 //!
-//! Design for the current (single-user) scope, extendable later:
+//! Design for the current single-user scope:
 //!
 //! - One global `tracing` subscriber with an env-filter, an fmt layer
 //!   whose format (pretty vs JSON) is decided at startup.
@@ -26,9 +26,7 @@
 //! );
 //! ```
 //!
-//! When the service grows multi-user, the same call sites will double-
-//! write to a durable `audit_events` DB table — no code changes at the
-//! call sites, just a broader sink.
+//! These same call sites serve as a local audit trail for the operator.
 //!
 //! ## Error chains
 //!

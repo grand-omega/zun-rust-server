@@ -120,8 +120,8 @@ async fn health_includes_disk_usage_field() {
         .unwrap();
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
     let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    // Field is present even with no users dir yet.
-    assert!(body["disk"]["data_users_bytes"].as_u64().is_some());
+    // Field is present even with no data dir yet.
+    assert!(body["disk"]["data_bytes"].as_u64().is_some());
 }
 
 #[tokio::test]

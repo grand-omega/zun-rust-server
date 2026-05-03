@@ -61,9 +61,7 @@ impl IntoResponse for AppError {
                 "input_id": input_id,
             }),
             // For 5xx, expose enough of the chain to debug from the phone
-            // (still single-user friendly) but redact filesystem paths and
-            // upstream URLs so we don't leak internals if/when the API
-            // grows multi-user.
+            // but redact filesystem paths and upstream URLs.
             Self::Internal(e) => json!({
                 "error": redact_internal(&format!("{e:#}")),
                 "code": code,
@@ -177,7 +175,7 @@ mod tests {
 
     #[test]
     fn redacts_paths() {
-        let s = "read /home/doremy/Desktop/zun-rust-server/data/users/1/cache/inputs/abc.jpg: No such file";
+        let s = "read /home/doremy/Desktop/zun-rust-server/data/cache/inputs/abc.jpg: No such file";
         let r = redact_internal(s);
         assert!(r.contains("<path>"), "got: {r}");
         assert!(!r.contains("/home/"), "leaked path: {r}");

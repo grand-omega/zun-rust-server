@@ -134,7 +134,7 @@ async fn get_result_serves_png_when_done() {
         Some(1_700_000_030),
     )
     .await;
-    let rel = "users/1/outputs/zun_done-job_00001_.png";
+    let rel = "outputs/zun_done-job_00001_.png";
     sqlx::query("UPDATE jobs SET output_path = ? WHERE id = ?")
         .bind(rel)
         .bind("done-job")
@@ -157,7 +157,7 @@ async fn get_result_serves_png_when_done() {
 // ---------- /api/v1/jobs/{id}/thumb ----------
 
 #[tokio::test]
-async fn get_thumb_lazy_generates_jpeg_and_caches_under_user_dir() {
+async fn get_thumb_lazy_generates_jpeg_and_caches_under_thumb_dir() {
     let app = common::test_app().await;
     let png = common::tiny_png(600, 400);
     let input_id =
@@ -174,7 +174,7 @@ async fn get_thumb_lazy_generates_jpeg_and_caches_under_user_dir() {
         Some(1_700_000_030),
     )
     .await;
-    let out_rel = "users/1/outputs/zun_thumb-job_00001_.png";
+    let out_rel = "outputs/zun_thumb-job_00001_.png";
     sqlx::query("UPDATE jobs SET output_path = ? WHERE id = ?")
         .bind(out_rel)
         .bind("thumb-job")
@@ -204,8 +204,8 @@ async fn get_thumb_lazy_generates_jpeg_and_caches_under_user_dir() {
     let (w, h) = reader.into_dimensions().unwrap();
     assert!(w.max(h) <= 400);
 
-    // Cached under per-user thumbs dir.
-    let cached_abs = app._tempdir.path().join("users/1/thumbs/thumb-job.jpg");
+    // Cached under the thumbs dir.
+    let cached_abs = app._tempdir.path().join("thumbs/thumb-job.jpg");
     assert!(
         cached_abs.exists(),
         "expected cached thumb at {cached_abs:?}"
@@ -216,7 +216,7 @@ async fn get_thumb_lazy_generates_jpeg_and_caches_under_user_dir() {
         .fetch_one(&app.db)
         .await
         .unwrap();
-    assert_eq!(thumb_path, "users/1/thumbs/thumb-job.jpg");
+    assert_eq!(thumb_path, "thumbs/thumb-job.jpg");
 }
 
 #[tokio::test]
@@ -237,7 +237,7 @@ async fn get_preview_lazy_generates_jpeg_and_caches() {
         Some(1_700_000_030),
     )
     .await;
-    let out_rel = "users/1/outputs/zun_preview-job_00001_.png";
+    let out_rel = "outputs/zun_preview-job_00001_.png";
     sqlx::query("UPDATE jobs SET output_path = ? WHERE id = ?")
         .bind(out_rel)
         .bind("preview-job")
@@ -269,7 +269,7 @@ async fn get_preview_lazy_generates_jpeg_and_caches() {
     // Preview is markedly larger than a 400px thumb.
     assert!(w.max(h) > 400);
 
-    let cached = app._tempdir.path().join("users/1/previews/preview-job.jpg");
+    let cached = app._tempdir.path().join("previews/preview-job.jpg");
     assert!(cached.exists(), "expected preview cached at {cached:?}");
 
     let (preview_path,): (String,) = sqlx::query_as("SELECT preview_path FROM jobs WHERE id = ?")
@@ -277,7 +277,7 @@ async fn get_preview_lazy_generates_jpeg_and_caches() {
         .fetch_one(&app.db)
         .await
         .unwrap();
-    assert_eq!(preview_path, "users/1/previews/preview-job.jpg");
+    assert_eq!(preview_path, "previews/preview-job.jpg");
 }
 
 #[tokio::test]

@@ -13,10 +13,7 @@ use std::path::PathBuf;
 
 use sqlx::SqlitePool;
 
-use crate::{
-    paths::{self, subdir},
-    state::UserId,
-};
+use crate::paths::{self, subdir};
 
 pub const THUMB_MAX_EDGE: u32 = 400;
 pub const PREVIEW_MAX_EDGE: u32 = 1280;
@@ -28,14 +25,12 @@ const JPEG_QUALITY: u8 = 85;
 pub async fn generate_for_job(
     db: &SqlitePool,
     data_dir: &std::path::Path,
-    user: UserId,
     job_id: &str,
     output_abs: &std::path::Path,
 ) {
     if let Err(e) = render_and_persist(
         db,
         data_dir,
-        user,
         job_id,
         output_abs,
         subdir::THUMBS,
@@ -49,7 +44,6 @@ pub async fn generate_for_job(
     if let Err(e) = render_and_persist(
         db,
         data_dir,
-        user,
         job_id,
         output_abs,
         subdir::PREVIEWS,
@@ -69,24 +63,19 @@ pub async fn generate_for_job(
 pub async fn ensure_one(
     db: &SqlitePool,
     data_dir: &std::path::Path,
-    user: UserId,
     job_id: &str,
     output_abs: &std::path::Path,
     sub: &'static str,
     max_edge: u32,
     column: &'static str,
 ) -> anyhow::Result<PathBuf> {
-    render_and_persist(
-        db, data_dir, user, job_id, output_abs, sub, max_edge, column,
-    )
-    .await
+    render_and_persist(db, data_dir, job_id, output_abs, sub, max_edge, column).await
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn render_and_persist(
     db: &SqlitePool,
     data_dir: &std::path::Path,
-    user: UserId,
     job_id: &str,
     output_abs: &std::path::Path,
     sub: &'static str,
@@ -94,7 +83,7 @@ async fn render_and_persist(
     column: &'static str,
 ) -> anyhow::Result<PathBuf> {
     let filename = format!("{job_id}.jpg");
-    let abs = paths::user_data_path(data_dir, user, sub, &filename)?;
+    let abs = paths::data_path(data_dir, sub, &filename)?;
     if let Some(parent) = abs.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
@@ -127,11 +116,10 @@ async fn render_and_persist(
 
     // Build the UPDATE dynamically. `column` is a hardcoded constant in
     // every call site — never user input — so string-substitution is safe.
-    let sql = format!("UPDATE jobs SET {column} = ? WHERE id = ? AND user_id = ?");
+    let sql = format!("UPDATE jobs SET {column} = ? WHERE id = ?");
     sqlx::query(&sql)
         .bind(&rel)
         .bind(job_id)
-        .bind(user.0)
         .execute(db)
         .await?;
     Ok(abs)

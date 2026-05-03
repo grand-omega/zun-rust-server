@@ -16,8 +16,8 @@ Prerequisites:
 
 ```bash
 cp config.example.toml config.toml   # then edit: set token, bind address
-cargo run                            # creates data/jobs.db with the v2 schema and seeds user_id=1
-cargo run --bin zun-admin -- seed-prompts admin --from starter_prompts.toml
+cargo run                            # creates data/jobs.db with the v2 schema
+cargo run --bin zun-admin -- seed-prompts --from starter_prompts.toml
 ```
 
 Hit `/api/v1/health` to verify:
@@ -36,7 +36,7 @@ All config lives in `config.toml` (gitignored). Copy from `config.example.toml`:
 | `token` | — (required) | Bearer token for the Android client |
 | `bind` | `0.0.0.0:8080` | Listen address — works on LAN and Tailscale simultaneously |
 | `comfy_url` | `http://127.0.0.1:8188` | ComfyUI HTTP base |
-| `data_dir` | `./data` | Houses `jobs.db`, `users/<uid>/{cache,outputs,thumbs}/`, and the `workflows/` symlink |
+| `data_dir` | `./data` | Houses `jobs.db`, `{cache,outputs,thumbs,previews}/`, and the `workflows/` symlink |
 | `log_format` | `auto` | `auto` (pretty on TTY, JSON otherwise), `pretty`, or `json` |
 
 `RUST_LOG` env var still works for log-level tuning (e.g. `RUST_LOG=debug`).
