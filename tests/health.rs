@@ -120,28 +120,17 @@ async fn health_includes_disk_usage_field() {
         .unwrap();
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
     let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    // Field is present even with no users dir yet.
-    assert!(body["disk"]["data_users_bytes"].as_u64().is_some());
+    // Field is present even with no data dir yet.
+    assert!(body["disk"]["data_bytes"].as_u64().is_some());
 }
 
 #[tokio::test]
-async fn capabilities_reports_supported_and_disabled_workflows() {
+async fn capabilities_reports_enabled_workflows() {
     let mut app = common::test_app().await;
     common::seed_workflow(
         &mut app,
         "flux2_klein_edit",
         common::supported_edit_workflow(),
-    );
-    common::seed_workflow(
-        &mut app,
-        "flux_fill_auto_mask",
-        serde_json::json!({
-            "4": { "inputs": { "image": "INPUT_IMAGE_PLACEHOLDER" } },
-            "9": { "inputs": { "text": "PROMPT_PLACEHOLDER" } },
-            "10": { "inputs": { "prompt": "MASK_PROMPT_PLACEHOLDER" } },
-            "16": { "inputs": { "noise_seed": "SEED_PLACEHOLDER" } },
-            "19": { "inputs": { "filename_prefix": "FILENAME_PREFIX_PLACEHOLDER" } }
-        }),
     );
 
     let resp = app
@@ -181,16 +170,9 @@ async fn capabilities_reports_supported_and_disabled_workflows() {
     assert_eq!(heavy["default_width"], 768);
     assert_eq!(heavy["default_height"], 1024);
     assert!(heavy["warning"].as_str().unwrap().contains("16 GB VRAM"));
-    let disabled = workflows
-        .iter()
-        .find(|w| w["name"] == "flux_fill_auto_mask")
-        .unwrap();
-    assert_eq!(disabled["supported"], false);
     assert!(
-        disabled["reason"]
-            .as_str()
-            .unwrap()
-            .contains("MASK_PROMPT_PLACEHOLDER")
+        workflows.iter().all(|w| w["name"] != "flux_fill_auto_mask"),
+        "capabilities should only expose enabled workflows"
     );
 }
 

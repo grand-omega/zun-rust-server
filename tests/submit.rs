@@ -63,12 +63,9 @@ async fn submit_valid_job_returns_202_with_location_and_job_id() {
     assert_eq!(location, format!("/api/v1/jobs/{job_id}"));
     assert!(input_id > 0);
 
-    // Cache file landed under data/users/1/cache/inputs/<sha>.jpg
+    // Cache file landed under data/cache/inputs/<sha>.jpg
     let sha = zun_rust_server::hash::sha256_hex(img);
-    let expected = app
-        ._tempdir
-        .path()
-        .join(format!("users/1/cache/inputs/{sha}.jpg"));
+    let expected = app._tempdir.path().join(format!("cache/inputs/{sha}.jpg"));
     assert!(expected.exists(), "expected cache at {expected:?}");
 
     // Job is queryable, queued, has a non-zero seed.
@@ -80,7 +77,8 @@ async fn submit_valid_job_returns_202_with_location_and_job_id() {
     let status = body_json(resp).await;
     assert_eq!(status["id"], job_id);
     assert_eq!(status["status"], "queued");
-    assert_eq!(status["prompt_id"], prompt_id);
+    assert_eq!(status["source_prompt_id"], prompt_id);
+    assert_eq!(status["prompt_text"], "test prompt");
     assert_eq!(status["workflow"], "flux2_klein_edit");
     assert_eq!(status["input_id"], input_id);
     assert!(status["seed"].as_i64().is_some());
@@ -125,10 +123,7 @@ async fn submit_json_with_known_hash_but_missing_file_returns_409_and_clears_pat
     let input_id = common::seed_input(&app.db, app._tempdir.path(), &sha, Some(img)).await;
 
     // Delete the file out from under the row.
-    let abs = app
-        ._tempdir
-        .path()
-        .join(format!("users/1/cache/inputs/{sha}.jpg"));
+    let abs = app._tempdir.path().join(format!("cache/inputs/{sha}.jpg"));
     std::fs::remove_file(&abs).expect("remove cached file");
 
     let body = serde_json::json!({

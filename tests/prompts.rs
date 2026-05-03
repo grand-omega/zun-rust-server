@@ -176,19 +176,8 @@ async fn create_with_unknown_workflow_is_400() {
 }
 
 #[tokio::test]
-async fn create_with_loaded_but_unsupported_workflow_is_400() {
-    let mut app = common::test_app().await;
-    common::seed_workflow(
-        &mut app,
-        "flux_fill_auto_mask",
-        json!({
-            "4": { "inputs": { "image": "INPUT_IMAGE_PLACEHOLDER" }, "class_type": "LoadImage" },
-            "9": { "inputs": { "text": "PROMPT_PLACEHOLDER" }, "class_type": "CLIPTextEncode" },
-            "10": { "inputs": { "prompt": "MASK_PROMPT_PLACEHOLDER" }, "class_type": "GroundingDinoSAMSegment" },
-            "16": { "inputs": { "noise_seed": "SEED_PLACEHOLDER" }, "class_type": "RandomNoise" },
-            "19": { "inputs": { "filename_prefix": "FILENAME_PREFIX_PLACEHOLDER" }, "class_type": "SaveImage" }
-        }),
-    );
+async fn create_with_not_enabled_workflow_is_400() {
+    let app = common::test_app().await;
     let resp = app
         .router
         .oneshot(authed_json(
@@ -208,7 +197,7 @@ async fn create_with_loaded_but_unsupported_workflow_is_400() {
         body["error"]
             .as_str()
             .unwrap()
-            .contains("MASK_PROMPT_PLACEHOLDER")
+            .contains("unknown workflow: flux_fill_auto_mask")
     );
 }
 

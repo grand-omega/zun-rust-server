@@ -9,7 +9,7 @@ use http_body_util::BodyExt;
 use serde_json::json;
 use std::time::Duration;
 use tower::ServiceExt;
-use wiremock::matchers::{method, path as mock_path};
+use wiremock::matchers::{body_string_contains, method, path as mock_path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 mod common;
@@ -96,6 +96,7 @@ async fn submit_to_done_roundtrip_via_worker() {
 
     Mock::given(method("POST"))
         .and(mock_path("/prompt"))
+        .and(body_string_contains("test prompt"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "prompt_id": "fake-prompt-xyz",
             "number": 1,
@@ -130,6 +131,13 @@ async fn submit_to_done_roundtrip_via_worker() {
         .unwrap()
         .to_string();
 
+    sqlx::query("UPDATE custom_prompts SET text = ? WHERE id = ?")
+        .bind("edited after submit")
+        .bind(prompt_id)
+        .execute(&app.db)
+        .await
+        .unwrap();
+
     Mock::given(method("GET"))
         .and(mock_path("/history/fake-prompt-xyz"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -151,7 +159,7 @@ async fn submit_to_done_roundtrip_via_worker() {
     assert_eq!(done["status"], "done");
     assert!(done["completed_at"].as_i64().unwrap() > 0);
 
-    let output_rel = format!("users/1/outputs/zun_{job_id}_00001_.png");
+    let output_rel = format!("outputs/zun_{job_id}_00001_.png");
     let output_abs = app._tempdir.path().join(&output_rel);
     assert!(output_abs.exists(), "output should be at {output_abs:?}");
     let bytes = std::fs::read(&output_abs).unwrap();

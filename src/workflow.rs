@@ -31,9 +31,6 @@ pub const LORA: &str = "LORA_PLACEHOLDER";
 
 pub const FLUX2_KLEIN_9B_KV_EXPERIMENTAL: &str = "flux2_klein_9b_kv_experimental";
 
-const SERVER_REQUIRED_EDIT_PLACEHOLDERS: &[&str] = &[PROMPT, INPUT_IMAGE, FILENAME_PREFIX, SEED];
-const SERVER_SUPPORTED_PLACEHOLDERS: &[&str] = SERVER_REQUIRED_EDIT_PLACEHOLDERS;
-
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct WorkflowSupport {
     pub name: String,
@@ -67,43 +64,51 @@ impl WorkflowRegistry {
     pub fn empty() -> Self {
         Self {
             templates: HashMap::new(),
-            support: HashMap::new(),
+            support: HashMap::from([(
+                FLUX2_KLEIN_9B_KV_EXPERIMENTAL.to_string(),
+                flux2_klein_9b_kv_experimental_support("flux2_klein_edit"),
+            )]),
         }
     }
 
     pub fn supported_template(&self, name: &str) -> Result<&Value, WorkflowSupportError> {
         match self.support.get(name) {
-            Some(s) if s.supported => self
+            Some(s) if s.supported && s.runtime == "comfyui" => self
                 .templates
                 .get(name)
                 .ok_or_else(|| WorkflowSupportError::Unknown(name.to_string())),
+            Some(s) if s.supported && s.runtime == "diffusers" => {
+                Err(WorkflowSupportError::Virtual {
+                    name: name.to_string(),
+                })
+            }
             Some(s) => Err(WorkflowSupportError::Unsupported {
                 name: name.to_string(),
                 reason: s.reason.clone().unwrap_or_else(|| "unsupported".into()),
-            }),
-            None if is_virtual_supported_workflow(name) => Err(WorkflowSupportError::Virtual {
-                name: name.to_string(),
             }),
             None => Err(WorkflowSupportError::Unknown(name.to_string())),
         }
     }
 
     pub fn supported_count(&self) -> usize {
-        self.support.values().filter(|s| s.supported).count() + 1
+        self.support.values().filter(|s| s.supported).count()
     }
 
     pub fn support_list(&self) -> Vec<WorkflowSupport> {
         let mut items: Vec<_> = self.support.values().cloned().collect();
-        items.push(flux2_klein_9b_kv_experimental_support());
         items.sort_by(|a, b| a.name.cmp(&b.name));
         items
     }
 
     pub fn supports(&self, name: &str) -> Result<(), WorkflowSupportError> {
-        if is_virtual_supported_workflow(name) {
-            return Ok(());
+        match self.support.get(name) {
+            Some(s) if s.supported => Ok(()),
+            Some(s) => Err(WorkflowSupportError::Unsupported {
+                name: name.to_string(),
+                reason: s.reason.clone().unwrap_or_else(|| "unsupported".into()),
+            }),
+            None => Err(WorkflowSupportError::Unknown(name.to_string())),
         }
-        self.supported_template(name).map(|_| ())
     }
 }
 
@@ -170,46 +175,44 @@ pub fn build_edit_workflow(
     out
 }
 
-pub fn load_registry(dir: &Path) -> anyhow::Result<WorkflowRegistry> {
-    let templates = load_templates(dir)?;
-    let support = analyze_templates(&templates);
+pub fn load_registry(
+    dir: &Path,
+    enabled_workflows: &[String],
+    default_workflow: &str,
+) -> anyhow::Result<WorkflowRegistry> {
+    let mut templates = HashMap::new();
+    let mut support = HashMap::new();
+
+    for name in enabled_workflows {
+        if is_virtual_supported_workflow(name) {
+            support.insert(
+                name.clone(),
+                flux2_klein_9b_kv_experimental_support(default_workflow),
+            );
+            continue;
+        }
+
+        let template = load_template(dir, name)?;
+        templates.insert(name.clone(), template);
+        support.insert(name.clone(), workflow_support(name, default_workflow));
+    }
+
     Ok(WorkflowRegistry { templates, support })
 }
 
-pub fn analyze_templates(templates: &HashMap<String, Value>) -> HashMap<String, WorkflowSupport> {
-    templates
-        .iter()
-        .map(|(name, template)| {
-            let placeholders = collect_placeholders(template);
-            let reason = unsupported_reason(name, &placeholders);
-            let supported = reason.is_none();
-            let metadata = workflow_metadata(name);
-            (
-                name.clone(),
-                WorkflowSupport {
-                    name: name.clone(),
-                    display_name: metadata.display_name,
-                    kind: metadata.kind.to_string(),
-                    requires_input_image: metadata.requires_input_image,
-                    experimental: metadata.experimental,
-                    default: metadata.default,
-                    runtime: metadata.runtime.to_string(),
-                    pipeline: metadata.pipeline.map(str::to_string),
-                    model_path: metadata.model_path.map(str::to_string),
-                    dtype: metadata.dtype.map(str::to_string),
-                    offload_mode: metadata.offload_mode.map(str::to_string),
-                    default_steps: metadata.default_steps,
-                    default_width: metadata.default_width,
-                    default_height: metadata.default_height,
-                    loaded: true,
-                    supported,
-                    placeholders,
-                    warning: metadata.warning.map(str::to_string),
-                    reason,
-                },
-            )
-        })
-        .collect()
+pub fn support_for_templates(
+    templates: &HashMap<String, Value>,
+    default_workflow: &str,
+) -> HashMap<String, WorkflowSupport> {
+    let mut support: HashMap<String, WorkflowSupport> = templates
+        .keys()
+        .map(|name| (name.clone(), workflow_support(name, default_workflow)))
+        .collect();
+    support.insert(
+        FLUX2_KLEIN_9B_KV_EXPERIMENTAL.to_string(),
+        flux2_klein_9b_kv_experimental_support(default_workflow),
+    );
+    support
 }
 
 struct WorkflowMetadata {
@@ -217,7 +220,6 @@ struct WorkflowMetadata {
     kind: &'static str,
     requires_input_image: bool,
     experimental: bool,
-    default: bool,
     runtime: &'static str,
     pipeline: Option<&'static str>,
     model_path: Option<&'static str>,
@@ -236,7 +238,6 @@ fn workflow_metadata(name: &str) -> WorkflowMetadata {
             kind: "image_edit",
             requires_input_image: true,
             experimental: false,
-            default: true,
             runtime: "comfyui",
             pipeline: None,
             model_path: None,
@@ -252,7 +253,6 @@ fn workflow_metadata(name: &str) -> WorkflowMetadata {
             kind: "image_edit",
             requires_input_image: true,
             experimental: true,
-            default: false,
             runtime: "comfyui",
             pipeline: None,
             model_path: None,
@@ -268,7 +268,6 @@ fn workflow_metadata(name: &str) -> WorkflowMetadata {
             kind: "image_edit",
             requires_input_image: true,
             experimental: false,
-            default: false,
             runtime: "comfyui",
             pipeline: None,
             model_path: None,
@@ -286,14 +285,44 @@ pub fn is_virtual_supported_workflow(name: &str) -> bool {
     name == FLUX2_KLEIN_9B_KV_EXPERIMENTAL
 }
 
-fn flux2_klein_9b_kv_experimental_support() -> WorkflowSupport {
+fn workflow_support(name: &str, default_workflow: &str) -> WorkflowSupport {
+    let metadata = workflow_metadata(name);
+    WorkflowSupport {
+        name: name.to_string(),
+        display_name: metadata.display_name,
+        kind: metadata.kind.to_string(),
+        requires_input_image: metadata.requires_input_image,
+        experimental: metadata.experimental,
+        default: name == default_workflow,
+        runtime: metadata.runtime.to_string(),
+        pipeline: metadata.pipeline.map(str::to_string),
+        model_path: metadata.model_path.map(str::to_string),
+        dtype: metadata.dtype.map(str::to_string),
+        offload_mode: metadata.offload_mode.map(str::to_string),
+        default_steps: metadata.default_steps,
+        default_width: metadata.default_width,
+        default_height: metadata.default_height,
+        loaded: true,
+        supported: true,
+        placeholders: vec![
+            PROMPT.to_string(),
+            INPUT_IMAGE.to_string(),
+            FILENAME_PREFIX.to_string(),
+            SEED.to_string(),
+        ],
+        warning: metadata.warning.map(str::to_string),
+        reason: None,
+    }
+}
+
+fn flux2_klein_9b_kv_experimental_support(default_workflow: &str) -> WorkflowSupport {
     WorkflowSupport {
         name: FLUX2_KLEIN_9B_KV_EXPERIMENTAL.to_string(),
         display_name: "FLUX 2 klein 9B-KV Experimental".to_string(),
         kind: "image_edit".to_string(),
         requires_input_image: true,
         experimental: true,
-        default: false,
+        default: default_workflow == FLUX2_KLEIN_9B_KV_EXPERIMENTAL,
         runtime: "diffusers".to_string(),
         pipeline: Some("Flux2KleinKVPipeline".to_string()),
         model_path: Some("/home/doremy/ml/t2i/flux2-klein-9b-kv".to_string()),
@@ -330,73 +359,6 @@ fn humanize_workflow_name(name: &str) -> String {
         .join(" ")
 }
 
-fn collect_placeholders(value: &Value) -> Vec<String> {
-    fn walk(value: &Value, out: &mut Vec<String>) {
-        match value {
-            Value::String(s) if is_known_placeholder(s) => out.push(s.clone()),
-            Value::Array(arr) => {
-                for v in arr {
-                    walk(v, out);
-                }
-            }
-            Value::Object(obj) => {
-                for v in obj.values() {
-                    walk(v, out);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    let mut out = Vec::new();
-    walk(value, &mut out);
-    out.sort();
-    out.dedup();
-    out
-}
-
-fn unsupported_reason(name: &str, placeholders: &[String]) -> Option<String> {
-    if name == "flux2_klein_9b_kv_edit" {
-        return Some(
-            "use flux2_klein_9b_kv_experimental; backend 9B-KV support is Diffusers-backed"
-                .to_string(),
-        );
-    }
-    for required in SERVER_REQUIRED_EDIT_PLACEHOLDERS {
-        if !placeholders.iter().any(|p| p == required) {
-            return Some(format!("missing required placeholder {required}"));
-        }
-    }
-    let unsupported: Vec<_> = placeholders
-        .iter()
-        .filter(|p| !SERVER_SUPPORTED_PLACEHOLDERS.contains(&p.as_str()))
-        .cloned()
-        .collect();
-    if unsupported.is_empty() {
-        None
-    } else {
-        Some(format!(
-            "requires unsupported placeholder{} {}",
-            if unsupported.len() == 1 { "" } else { "s" },
-            unsupported.join(", ")
-        ))
-    }
-}
-
-fn is_known_placeholder(s: &str) -> bool {
-    matches!(
-        s,
-        PROMPT
-            | INPUT_IMAGE
-            | FILENAME_PREFIX
-            | SEED
-            | MASK_IMAGE
-            | REFERENCE_IMAGE
-            | MASK_PROMPT
-            | LORA
-    )
-}
-
 /// Substitute `"SEED_PLACEHOLDER"` (a string) with a JSON number.
 /// Handled separately because all other placeholders stay as strings;
 /// seed is a sampler integer.
@@ -422,33 +384,15 @@ pub fn patch_seed_placeholder(value: &mut Value, seed: i64) {
     walk(value, seed);
 }
 
-/// Load every `*.json` in `dir` into a map keyed by file stem
-/// (e.g., `"flux2_klein_edit"`). Fails fast on unreadable or malformed
-/// files. Duplicate stems (case-insensitive collisions on case-insensitive
-/// filesystems) are not expected and would overwrite silently — trust the
-/// filesystem.
-pub fn load_templates(dir: &Path) -> anyhow::Result<HashMap<String, Value>> {
-    let mut out = HashMap::new();
-    let entries = std::fs::read_dir(dir)
-        .map_err(|e| anyhow::anyhow!("read workflows dir {}: {e}", dir.display()))?;
-    for entry in entries {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("json") {
-            continue;
-        }
-        let stem = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .ok_or_else(|| anyhow::anyhow!("non-utf8 workflow filename: {}", path.display()))?
-            .to_string();
-        let raw = std::fs::read_to_string(&path)
-            .map_err(|e| anyhow::anyhow!("read {}: {e}", path.display()))?;
-        let value: Value = serde_json::from_str(&raw)
-            .map_err(|e| anyhow::anyhow!("parse {}: {e}", path.display()))?;
-        out.insert(stem, value);
+/// Load a single explicitly-enabled workflow JSON by name.
+pub fn load_template(dir: &Path, name: &str) -> anyhow::Result<Value> {
+    if name.is_empty() || name.contains('/') || name.contains('\\') || name.contains("..") {
+        anyhow::bail!("invalid workflow name: {name:?}");
     }
-    Ok(out)
+    let path = dir.join(format!("{name}.json"));
+    let raw = std::fs::read_to_string(&path)
+        .map_err(|e| anyhow::anyhow!("read {}: {e}", path.display()))?;
+    serde_json::from_str(&raw).map_err(|e| anyhow::anyhow!("parse {}: {e}", path.display()))
 }
 
 // --- tests --------------------------------------------------------------
@@ -544,28 +488,6 @@ mod tests {
     }
 
     #[test]
-    fn comfy_9b_kv_template_is_disabled_in_favor_of_diffusers() {
-        let mut templates = HashMap::new();
-        templates.insert(
-            "flux2_klein_9b_kv_edit".to_string(),
-            json!({
-                "4": { "inputs": { "image": "INPUT_IMAGE_PLACEHOLDER" } },
-                "9": { "inputs": { "text": "PROMPT_PLACEHOLDER" } },
-                "16": { "inputs": { "noise_seed": "SEED_PLACEHOLDER" } },
-                "19": { "inputs": { "filename_prefix": "FILENAME_PREFIX_PLACEHOLDER" } }
-            }),
-        );
-
-        let support = analyze_templates(&templates);
-        let wf = support.get("flux2_klein_9b_kv_edit").unwrap();
-        assert!(!wf.supported);
-        assert_eq!(wf.display_name, "FLUX 2 klein 9B-KV");
-        assert!(wf.experimental);
-        assert_eq!(wf.runtime, "comfyui");
-        assert!(wf.reason.as_deref().unwrap().contains("Diffusers-backed"));
-    }
-
-    #[test]
     fn flux2_klein_edit_remains_default() {
         let mut templates = HashMap::new();
         templates.insert(
@@ -578,7 +500,7 @@ mod tests {
             }),
         );
 
-        let support = analyze_templates(&templates);
+        let support = support_for_templates(&templates, "flux2_klein_edit");
         let wf = support.get("flux2_klein_edit").unwrap();
         assert!(wf.supported);
         assert_eq!(wf.display_name, "FLUX 2 klein");
@@ -590,7 +512,13 @@ mod tests {
 
     #[test]
     fn support_list_includes_virtual_diffusers_9b_kv() {
-        let registry = WorkflowRegistry::empty();
+        let registry = WorkflowRegistry {
+            templates: HashMap::new(),
+            support: HashMap::from([(
+                FLUX2_KLEIN_9B_KV_EXPERIMENTAL.to_string(),
+                flux2_klein_9b_kv_experimental_support("flux2_klein_edit"),
+            )]),
+        };
         assert!(registry.supports(FLUX2_KLEIN_9B_KV_EXPERIMENTAL).is_ok());
         assert_eq!(registry.supported_count(), 1);
         let wf = registry
@@ -613,24 +541,20 @@ mod tests {
     }
 
     #[test]
-    fn load_templates_loads_all_real_workflows() {
+    fn load_template_loads_real_workflow() {
         // This test asserts the contract with project-zun: when the symlink
-        // is present, every file loads cleanly and the known templates
-        // appear. Skipped if the symlink isn't set up in the dev env.
+        // is present, the configured workflow loads cleanly. Skipped if the
+        // symlink isn't set up in the dev env.
         let dir = std::path::Path::new("data/workflows");
         if !dir.exists() {
             eprintln!("data/workflows symlink missing; skipping real-template test");
             return;
         }
-        let loaded = load_templates(dir).expect("load templates");
-        assert!(
-            loaded.contains_key("flux2_klein_edit"),
-            "expected flux2_klein_edit in real workflows"
-        );
+        let loaded = load_template(dir, "flux2_klein_edit").expect("load template");
         // Real workflow must still contain a PROMPT placeholder (the
         // contract). If this fails, either the symlink points somewhere
         // unexpected or project-zun's contract changed.
-        let body = loaded["flux2_klein_edit"].to_string();
+        let body = loaded.to_string();
         assert!(body.contains("PROMPT_PLACEHOLDER"));
         assert!(body.contains("INPUT_IMAGE_PLACEHOLDER"));
         assert!(body.contains("FILENAME_PREFIX_PLACEHOLDER"));

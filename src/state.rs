@@ -9,17 +9,12 @@ use crate::{
     workflow::WorkflowRegistry,
 };
 
-/// Identifies which user owns a row. Mandatory parameter on every
-/// data-access function so cross-user access is unrepresentable in code.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct UserId(pub i64);
-
 #[derive(Clone)]
 pub struct AppState {
     pub db: SqlitePool,
     pub config: Config,
-    /// Workflow templates plus server support status. Shared across users
-    /// and admin-curated from `data/workflows/*.json`.
+    /// Workflow templates plus server support status, admin-curated from
+    /// `data/workflows/*.json`.
     pub workflows: Arc<WorkflowRegistry>,
     pub comfy: ComfyClient,
     /// Latest known ComfyUI reachability; updated by the monitor task,

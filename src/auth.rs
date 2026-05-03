@@ -14,11 +14,7 @@ use axum::{
 use parking_lot::Mutex;
 use subtle::ConstantTimeEq;
 
-use crate::{AppError, AppState, state::UserId};
-
-/// Single-user world: every authenticated request is user_id=1.
-/// When the server grows multi-user, this becomes a token→user lookup.
-const SINGLE_USER_ID: UserId = UserId(1);
+use crate::{AppError, AppState};
 
 /// Sliding-window rate limit on failed auth attempts per remote IP.
 /// After `MAX_FAILURES` failures within `WINDOW`, the IP is blocked until
@@ -97,7 +93,7 @@ fn peer_ip(req: &Request) -> Option<IpAddr> {
 /// the same peer IP, returns 429 for the remainder of the sliding window.
 pub async fn require_bearer(
     State(state): State<AppState>,
-    mut req: Request,
+    req: Request,
     next: Next,
 ) -> Result<Response, AppError> {
     let path = req.uri().path().to_string();
@@ -135,9 +131,8 @@ pub async fn require_bearer(
         return Err(AppError::Unauthorized);
     }
 
-    // Authenticated. Attach the user id so downstream handlers can extract
-    // it via Extension<UserId> and never have to invent a default.
-    req.extensions_mut().insert(SINGLE_USER_ID);
+    // Authenticated. This is a single-user server, so downstream handlers
+    // do not need any per-request identity.
     Ok(next.run(req).await)
 }
 

@@ -1,8 +1,7 @@
-//! Request handlers for `/api/v1/jobs/...`. All handlers are user-scoped:
-//! every SQL touching user-owned rows takes `UserId` as a mandatory filter.
+//! Request handlers for `/api/v1/jobs/...`.
 
 use axum::{
-    Extension, Json,
+    Json,
     extract::{FromRequest, Multipart, Path, Query, Request, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
@@ -15,7 +14,6 @@ use crate::{
     AppError, AppState,
     hash::{is_valid_sha256_hex, sha256_hex},
     paths::{self, subdir},
-    state::UserId,
 };
 
 /// Per-job random seed. ComfyUI's sampler validators reject negative seeds,
@@ -61,7 +59,6 @@ struct Upload {
 
 pub async fn submit_job(
     State(state): State<AppState>,
-    Extension(user): Extension<UserId>,
     req: Request,
 ) -> Result<(StatusCode, HeaderMap, Json<serde_json::Value>), AppError> {
     let fields = parse_submit(&state, req).await?;
@@ -72,10 +69,10 @@ pub async fn submit_job(
         ));
     }
 
-    let (resolved_workflow, resolved_prompt_text, resolved_prompt_id, prompt_timeout_seconds) =
-        resolve_prompt(&state, user, &fields).await?;
+    let (resolved_workflow, resolved_prompt_text, source_prompt_id, prompt_timeout_seconds) =
+        resolve_prompt(&state, &fields).await?;
 
-    let input_id = resolve_input(&state, user, &fields).await?;
+    let input_id = resolve_input(&state, &fields).await?;
 
     let job_id = uuid::Uuid::new_v4().to_string();
     let seed = random_seed();
@@ -83,15 +80,15 @@ pub async fn submit_job(
 
     sqlx::query(
         "INSERT INTO jobs \
-         (id, user_id, input_id, prompt_id, prompt_text, workflow, seed, status, created_at) \
+         (id, input_id, source_prompt_id, prompt_text, workflow, timeout_seconds, seed, status, created_at) \
          VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?)",
     )
     .bind(&job_id)
-    .bind(user.0)
     .bind(input_id)
-    .bind(resolved_prompt_id)
+    .bind(source_prompt_id)
     .bind(&resolved_prompt_text)
     .bind(&resolved_workflow)
+    .bind(prompt_timeout_seconds as i64)
     .bind(seed)
     .bind(now)
     .execute(&state.db)
@@ -103,10 +100,9 @@ pub async fn submit_job(
     tracing::info!(
         target: "audit",
         event = "job.submitted",
-        user_id = user.0,
         %job_id,
         input_id,
-        prompt_id = ?resolved_prompt_id,
+        source_prompt_id = ?source_prompt_id,
         workflow = %resolved_workflow,
         seed,
         timeout_s = prompt_timeout_seconds,
@@ -211,14 +207,13 @@ async fn parse_multipart(state: &AppState, req: Request) -> Result<SubmitFields,
     })
 }
 
-/// Returns `(workflow_name, prompt_text_for_jobs_row, prompt_id_for_jobs_row, timeout_s)`.
+/// Returns `(workflow_name, prompt_text_snapshot, source_prompt_id, timeout_s)`.
 /// Exactly one of prompt_id / prompt_text must be set; on prompt_text the
 /// caller must also supply `workflow`.
 async fn resolve_prompt(
     state: &AppState,
-    user: UserId,
     fields: &SubmitFields,
-) -> Result<(String, Option<String>, Option<i64>, u64), AppError> {
+) -> Result<(String, String, Option<i64>, u64), AppError> {
     match (fields.prompt_id, fields.prompt_text.as_deref()) {
         (Some(_), Some(_)) => Err(AppError::BadRequest(
             "supply prompt_id OR prompt_text, not both".into(),
@@ -229,23 +224,20 @@ async fn resolve_prompt(
         (Some(pid), None) => {
             let row: Option<(String, String, Option<i64>)> = sqlx::query_as(
                 "SELECT text, workflow, timeout_seconds FROM custom_prompts \
-                 WHERE id = ? AND user_id = ? AND deleted_at IS NULL",
+                 WHERE id = ? AND deleted_at IS NULL",
             )
             .bind(pid)
-            .bind(user.0)
             .fetch_optional(&state.db)
             .await?;
-            let (_text, workflow, timeout) =
+            let (text, workflow, timeout) =
                 row.ok_or_else(|| AppError::BadRequest(format!("unknown prompt_id: {pid}")))?;
             state
                 .workflows
                 .supports(&workflow)
                 .map_err(|e| AppError::BadRequest(e.to_string()))?;
-            // jobs.prompt_text stays null when prompt_id is set; the worker
-            // dereferences `text` from the prompt row at job-run time.
             Ok((
                 workflow,
-                None,
+                text,
                 Some(pid),
                 timeout
                     .map(|t| t as u64)
@@ -271,7 +263,7 @@ async fn resolve_prompt(
             }
             Ok((
                 workflow.to_string(),
-                Some(text.to_string()),
+                text.to_string(),
                 None,
                 crate::DEFAULT_TIMEOUT_SECONDS,
             ))
@@ -280,17 +272,12 @@ async fn resolve_prompt(
 }
 
 /// Cache-or-upload flow for the input. Returns the resolved input_id.
-async fn resolve_input(
-    state: &AppState,
-    user: UserId,
-    fields: &SubmitFields,
-) -> Result<i64, AppError> {
+async fn resolve_input(state: &AppState, fields: &SubmitFields) -> Result<i64, AppError> {
     let now = chrono::Utc::now().timestamp();
 
-    // Look for an existing row for this (user, sha).
+    // Look for an existing row for this sha.
     let mut existing: Option<(i64, Option<String>)> =
-        sqlx::query_as("SELECT id, path FROM inputs WHERE user_id = ? AND sha256 = ?")
-            .bind(user.0)
+        sqlx::query_as("SELECT id, path FROM inputs WHERE sha256 = ?")
             .bind(&fields.input_sha256)
             .fetch_optional(&state.db)
             .await?;
@@ -303,10 +290,9 @@ async fn resolve_input(
         let id_v = *id;
         let abs = state.config.data_dir.join(path);
         if tokio::fs::metadata(&abs).await.is_ok() {
-            sqlx::query("UPDATE inputs SET last_used_at = ? WHERE id = ? AND user_id = ?")
+            sqlx::query("UPDATE inputs SET last_used_at = ? WHERE id = ?")
                 .bind(now)
                 .bind(id_v)
-                .bind(user.0)
                 .execute(&state.db)
                 .await?;
             return Ok(id_v);
@@ -316,9 +302,8 @@ async fn resolve_input(
             path = %abs.display(),
             "cached input file missing on disk; clearing path",
         );
-        sqlx::query("UPDATE inputs SET path = NULL WHERE id = ? AND user_id = ?")
+        sqlx::query("UPDATE inputs SET path = NULL WHERE id = ?")
             .bind(id_v)
-            .bind(user.0)
             .execute(&state.db)
             .await?;
         existing = Some((id_v, None));
@@ -344,12 +329,7 @@ async fn resolve_input(
             }
             // Write the file under <cache>/<sha256>.<ext>.
             let filename = format!("{}.{}", fields.input_sha256, upload.ext);
-            let abs = paths::user_data_path(
-                &state.config.data_dir,
-                user,
-                subdir::CACHE_INPUTS,
-                &filename,
-            )?;
+            let abs = paths::data_path(&state.config.data_dir, subdir::CACHE_INPUTS, &filename)?;
             if let Some(parent) = abs.parent() {
                 tokio::fs::create_dir_all(parent).await?;
             }
@@ -376,7 +356,7 @@ async fn resolve_input(
                 sqlx::query(
                     "UPDATE inputs SET path = ?, original_name = ?, content_type = ?, \
                      size_bytes = ?, width = ?, height = ?, last_used_at = ? \
-                     WHERE id = ? AND user_id = ?",
+                     WHERE id = ?",
                 )
                 .bind(&rel)
                 .bind(&fields.input_name)
@@ -386,17 +366,15 @@ async fn resolve_input(
                 .bind(h)
                 .bind(now)
                 .bind(id)
-                .bind(user.0)
                 .execute(&state.db)
                 .await?;
                 id
             } else {
                 let res = sqlx::query(
                     "INSERT INTO inputs \
-                     (user_id, sha256, path, original_name, content_type, size_bytes, width, height, created_at, last_used_at) \
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                     (sha256, path, original_name, content_type, size_bytes, width, height, created_at, last_used_at) \
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 )
-                .bind(user.0)
                 .bind(&fields.input_sha256)
                 .bind(&rel)
                 .bind(&fields.input_name)
@@ -453,8 +431,8 @@ fn decode_cursor(s: &str) -> Result<Cursor, AppError> {
 struct JobSummaryRow {
     id: String,
     input_id: i64,
-    prompt_id: Option<i64>,
-    prompt_text: Option<String>,
+    source_prompt_id: Option<i64>,
+    prompt_text: String,
     workflow: String,
     seed: i64,
     status: String,
@@ -464,7 +442,6 @@ struct JobSummaryRow {
 
 pub async fn list_jobs(
     State(state): State<AppState>,
-    Extension(user): Extension<UserId>,
     Query(q): Query<ListQuery>,
 ) -> Result<Response, AppError> {
     let limit = q.limit.unwrap_or(50).clamp(1, 200);
@@ -473,11 +450,9 @@ pub async fn list_jobs(
     // doesn't have a great parameter-list builder; the chained query_as
     // would need 8 variants, so use a single QueryBuilder.
     let mut qb = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
-        "SELECT id, input_id, prompt_id, prompt_text, workflow, seed, status, created_at, completed_at \
-         FROM jobs WHERE user_id = ",
+        "SELECT id, input_id, source_prompt_id, prompt_text, workflow, seed, status, created_at, completed_at \
+         FROM jobs WHERE deleted_at IS NULL",
     );
-    qb.push_bind(user.0);
-    qb.push(" AND deleted_at IS NULL");
 
     if let Some(s) = q.status.as_deref() {
         if !matches!(s, "queued" | "running" | "done" | "failed" | "cancelled") {
@@ -524,7 +499,7 @@ pub async fn list_jobs(
             json!({
                 "id": r.id,
                 "input_id": r.input_id,
-                "prompt_id": r.prompt_id,
+                "source_prompt_id": r.source_prompt_id,
                 "prompt_text": r.prompt_text,
                 "workflow": r.workflow,
                 "seed": r.seed,
@@ -545,8 +520,8 @@ pub async fn list_jobs(
 struct JobFullRow {
     id: String,
     input_id: i64,
-    prompt_id: Option<i64>,
-    prompt_text: Option<String>,
+    source_prompt_id: Option<i64>,
+    prompt_text: String,
     workflow: String,
     seed: i64,
     status: String,
@@ -561,16 +536,14 @@ struct JobFullRow {
 
 pub async fn get_job(
     State(state): State<AppState>,
-    Extension(user): Extension<UserId>,
     Path(job_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let row: JobFullRow = sqlx::query_as(
-        "SELECT id, input_id, prompt_id, prompt_text, workflow, seed, status, \
+        "SELECT id, input_id, source_prompt_id, prompt_text, workflow, seed, status, \
          error_message, created_at, started_at, completed_at, width, height, output_path \
-         FROM jobs WHERE id = ? AND user_id = ? AND deleted_at IS NULL",
+         FROM jobs WHERE id = ? AND deleted_at IS NULL",
     )
     .bind(&job_id)
-    .bind(user.0)
     .fetch_optional(&state.db)
     .await?
     .ok_or(AppError::NotFound)?;
@@ -580,7 +553,7 @@ pub async fn get_job(
     Ok(Json(json!({
         "id": row.id,
         "input_id": row.input_id,
-        "prompt_id": row.prompt_id,
+        "source_prompt_id": row.source_prompt_id,
         "prompt_text": row.prompt_text,
         "workflow": row.workflow,
         "seed": row.seed,
@@ -613,29 +586,26 @@ async fn read_output_sidecar_metadata(
 
 pub async fn delete_job(
     State(state): State<AppState>,
-    Extension(user): Extension<UserId>,
     Path(job_id): Path<String>,
 ) -> Result<StatusCode, AppError> {
     let now = chrono::Utc::now().timestamp();
     let res = sqlx::query(
         "UPDATE jobs SET deleted_at = ? \
-         WHERE id = ? AND user_id = ? AND deleted_at IS NULL",
+         WHERE id = ? AND deleted_at IS NULL",
     )
     .bind(now)
     .bind(&job_id)
-    .bind(user.0)
     .execute(&state.db)
     .await?;
     if res.rows_affected() == 0 {
         return Err(AppError::NotFound);
     }
-    tracing::info!(target: "audit", event = "job.deleted", user_id = user.0, %job_id);
+    tracing::info!(target: "audit", event = "job.deleted", %job_id);
     Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn cancel_job(
     State(state): State<AppState>,
-    Extension(user): Extension<UserId>,
     Path(job_id): Path<String>,
 ) -> Result<StatusCode, AppError> {
     let now = chrono::Utc::now().timestamp();
@@ -643,11 +613,10 @@ pub async fn cancel_job(
     // worker can't race past us and mark the row done/failed.
     let res = sqlx::query(
         "UPDATE jobs SET status = 'cancelled', completed_at = ? \
-         WHERE id = ? AND user_id = ? AND status IN ('queued', 'running')",
+         WHERE id = ? AND status IN ('queued', 'running')",
     )
     .bind(now)
     .bind(&job_id)
-    .bind(user.0)
     .execute(&state.db)
     .await?;
     if res.rows_affected() == 0 {
@@ -661,26 +630,24 @@ pub async fn cancel_job(
     if let Err(e) = state.comfy.interrupt().await {
         tracing::warn!(%job_id, error = %e, "comfy /interrupt failed; row already cancelled");
     }
-    tracing::info!(target: "audit", event = "job.cancelled", user_id = user.0, %job_id);
+    tracing::info!(target: "audit", event = "job.cancelled", %job_id);
     Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn restore_job(
     State(state): State<AppState>,
-    Extension(user): Extension<UserId>,
     Path(job_id): Path<String>,
 ) -> Result<StatusCode, AppError> {
     let res = sqlx::query(
         "UPDATE jobs SET deleted_at = NULL \
-         WHERE id = ? AND user_id = ? AND deleted_at IS NOT NULL",
+         WHERE id = ? AND deleted_at IS NOT NULL",
     )
     .bind(&job_id)
-    .bind(user.0)
     .execute(&state.db)
     .await?;
     if res.rows_affected() == 0 {
         return Err(AppError::NotFound);
     }
-    tracing::info!(target: "audit", event = "job.restored", user_id = user.0, %job_id);
+    tracing::info!(target: "audit", event = "job.restored", %job_id);
     Ok(StatusCode::NO_CONTENT)
 }
