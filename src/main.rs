@@ -2,20 +2,22 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
 use zun_rust_server::{
-    AppState, Config, auth::AuthLimiter, backup, comfy::ComfyClient, comfy_monitor, db, logging,
-    purge, router, worker, workflow,
+    AppState, Config, auth::AuthLimiter, backup, comfy::ComfyClient, comfy_monitor, db,
+    hash::sha256_hex, logging, purge, router, worker, workflow,
 };
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let config = Config::load()?;
     logging::init(config.log_format)?;
-    let token_preview = format!("{}…", &config.token[..8.min(config.token.len())]);
+    // Identify the token by a sha256 prefix rather than dumping its bytes;
+    // log files end up in journals, screenshots, and bug reports.
+    let token_id = format!("sha256:{}", &sha256_hex(config.token.as_bytes())[..12]);
     tracing::info!(
         data_dir = %config.data_dir.display(),
         bind = %config.bind,
         comfy = %config.comfy_url,
-        token = %token_preview,
+        token = %token_id,
         "starting"
     );
 
