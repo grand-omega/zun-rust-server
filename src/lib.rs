@@ -103,12 +103,18 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
         .merge(authed);
 
+    // ServiceBuilder layer order: first .layer() = OUTERMOST. The propagate
+    // layer must sit OUTSIDE TimeoutLayer so that 408 responses synthesized
+    // by Timeout (which short-circuits inner layers) still get x-request-id
+    // copied onto them — log correlation matters most exactly when a
+    // request times out.
     app.layer(
         ServiceBuilder::new()
             .layer(SetSensitiveRequestHeadersLayer::new(std::iter::once(
                 header::AUTHORIZATION,
             )))
             .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
+            .layer(PropagateRequestIdLayer::x_request_id())
             .layer(
                 TraceLayer::new_for_http().make_span_with(|req: &Request<_>| {
                     let id = req
@@ -127,8 +133,7 @@ pub fn router(state: AppState) -> Router {
             .layer(TimeoutLayer::with_status_code(
                 axum::http::StatusCode::REQUEST_TIMEOUT,
                 REQUEST_TIMEOUT,
-            ))
-            .layer(PropagateRequestIdLayer::x_request_id()),
+            )),
     )
 }
 

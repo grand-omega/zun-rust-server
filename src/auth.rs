@@ -64,9 +64,15 @@ impl AuthLimiter {
     }
 
     fn check_blocked(&self, ip: IpAddr) -> bool {
+        // Use get_mut, NOT entry().or_default(): every authenticated request
+        // would otherwise insert an empty row, growing the map without bound
+        // in steady state. An IP we've never seen is by definition not
+        // blocked, so absence-as-false is correct.
         let mut guard = self.inner.lock();
-        let entry = guard.entry(ip).or_default();
-        entry.is_blocked(Instant::now())
+        match guard.get_mut(&ip) {
+            Some(state) => state.is_blocked(Instant::now()),
+            None => false,
+        }
     }
 
     fn record_failure(&self, ip: IpAddr) -> u32 {
@@ -185,6 +191,21 @@ mod tests {
             entry.window_start = Some(Instant::now() - (WINDOW + Duration::from_secs(1)));
         }
         assert!(!limiter.check_blocked(ip));
+    }
+
+    #[test]
+    fn check_blocked_does_not_insert_for_unseen_ip() {
+        // Authenticated requests funnel through check_blocked. If that path
+        // inserts an entry, the map grows unbounded in steady state. The
+        // sweep on record_failure only fires on failures, so without this
+        // guarantee the bound regresses silently.
+        let limiter = AuthLimiter::new();
+        let ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1));
+        assert!(!limiter.check_blocked(ip));
+        assert!(
+            limiter.inner.lock().is_empty(),
+            "check_blocked must not materialise an entry for an unseen IP",
+        );
     }
 
     #[test]
