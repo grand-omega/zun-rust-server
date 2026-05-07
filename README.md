@@ -6,7 +6,7 @@ Single-user, self-hosted. Runs on home LAN or Tailscale — no special network s
 
 ## Status
 
-**v0.2.0** — API-complete, end-to-end verified against real FLUX2 klein (~7 s per job on RTX 4070 Ti Super).
+**v0.3.0** — API-complete, end-to-end verified against real FLUX2 klein (~7 s per job on RTX 4070 Ti Super).
 
 ## Quick start
 
