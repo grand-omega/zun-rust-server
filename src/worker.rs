@@ -212,13 +212,13 @@ async fn mark_failed(db: &SqlitePool, job_id: &str, error_message: &str) -> anyh
 async fn process_job(state: &AppState, job: &QueuedJob) -> anyhow::Result<()> {
     let started_at = std::time::Instant::now();
     if !mark_running(&state.db, &job.id).await? {
-        // Lost the queued→running race: the row is no longer queued (most
-        // likely cancelled or hard-deleted between fetch and now). Drop the
-        // job silently — there's nothing to do, and mark_failed would
-        // overwrite the new status.
+        // Lost the queued→unclaimable race: the row was either cancelled,
+        // hard-deleted, or soft-deleted between fetch and now. Drop the job
+        // silently — there's nothing to do, and mark_failed would overwrite
+        // the new status.
         tracing::info!(
             target: "audit",
-            event = "job.skipped_not_queued",
+            event = "job.skipped_unclaimable",
             job_id = %job.id,
         );
         return Ok(());
@@ -406,6 +406,22 @@ async fn process_flux2_klein_9b_kv_diffusers(
         height = HEIGHT,
     );
 
+    // Register the cancel channel BEFORE spawn so a cancel_job firing in
+    // the microsecond window between spawn and select! still finds us. If
+    // spawn errors below, the RAII guard clears the slot on drop.
+    let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
+    {
+        let mut guard = state.running_diffusers_cancel.lock();
+        *guard = Some(DiffusersCancel {
+            job_id: job.id.clone(),
+            tx: cancel_tx,
+        });
+    }
+    let _cancel_guard = DiffusersCancelGuard {
+        state,
+        job_id: &job.id,
+    };
+
     // Spawn (not output()) so we own the Child and can bound it with a
     // timeout. kill_on_drop sends SIGKILL if the wait future is dropped
     // before it resolves — without this, a hung python runner wedges the
@@ -434,27 +450,20 @@ async fn process_flux2_klein_9b_kv_diffusers(
         .kill_on_drop(true)
         .spawn()?;
 
-    // Register a cancel channel so cancel_job can SIGKILL the runner. The
-    // guard deregisters on drop (covers early returns / panics).
-    let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
-    {
-        let mut guard = state.running_diffusers_cancel.lock();
-        *guard = Some(DiffusersCancel {
-            job_id: job.id.clone(),
-            tx: cancel_tx,
-        });
-    }
-    let _cancel_guard = DiffusersCancelGuard {
-        state,
-        job_id: &job.id,
-    };
-
     let output = tokio::select! {
         biased;
         _ = cancel_rx => {
             // Selecting this branch drops the wait future below, which drops
-            // the Child; kill_on_drop then SIGKILLs the python runner.
-            anyhow::bail!("Diffusers 9B-KV runner cancelled by user");
+            // the Child; kill_on_drop then SIGKILLs the python runner. The
+            // DB row is already 'cancelled' (cancel_job flipped it before
+            // signalling). Return Ok so the worker loop emits a cancellation
+            // audit event rather than the misleading job.failed.
+            tracing::info!(
+                target: "audit",
+                event = "job.cancelled_via_runner",
+                job_id = %job.id,
+            );
+            return Ok(());
         }
         res = tokio::time::timeout(
             Duration::from_secs(timeout_seconds),
