@@ -13,6 +13,16 @@ pub mod subdir {
     pub const PREVIEWS: &str = "previews";
 }
 
+/// Express an absolute on-disk path as a `data_dir`-relative string for
+/// storing in the DB (`output_path`, `inputs.path`, etc). Falls back to the
+/// absolute path's lossy form if the prefix doesn't strip — that should
+/// never happen in practice, but we don't want a broken path to fail a job.
+pub fn relative_for_db(abs: &Path, data_dir: &Path) -> String {
+    abs.strip_prefix(data_dir)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| abs.to_string_lossy().into_owned())
+}
+
 /// Build `<data_dir>/<subdir>/<filename>`. Rejects any filename that would
 /// escape the configured data dir.
 pub fn data_path(data_dir: &Path, subdir: &str, filename: &str) -> anyhow::Result<PathBuf> {

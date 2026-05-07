@@ -349,7 +349,7 @@ async fn resolve_input(state: &AppState, fields: &SubmitFields) -> Result<i64, A
                 _ => (None, None),
             };
 
-            let rel = relative_for_db(&abs, &state.config.data_dir);
+            let rel = paths::relative_for_db(&abs, &state.config.data_dir);
             let size = upload.bytes.len() as i64;
 
             let id: i64 = if let Some((id, _)) = existing_row {
@@ -391,12 +391,6 @@ async fn resolve_input(state: &AppState, fields: &SubmitFields) -> Result<i64, A
             Ok(id)
         }
     }
-}
-
-fn relative_for_db(abs: &std::path::Path, data_dir: &std::path::Path) -> String {
-    abs.strip_prefix(data_dir)
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| abs.to_string_lossy().into_owned())
 }
 
 // --------------------------- GET /api/v1/jobs ----------------------------

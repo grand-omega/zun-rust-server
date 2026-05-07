@@ -336,7 +336,7 @@ async fn process_job(state: &AppState, job: &QueuedJob) -> anyhow::Result<()> {
         tokio::fs::create_dir_all(parent).await?;
     }
     paths::atomic_write(&abs_output, &bytes).await?;
-    let rel_output = relative_for_db(&abs_output, &state.config.data_dir);
+    let rel_output = paths::relative_for_db(&abs_output, &state.config.data_dir);
 
     finalize_output(
         state,
@@ -492,7 +492,7 @@ async fn process_flux2_klein_9b_kv_diffusers(
     }
     paths::atomic_copy(&generated, &abs_output).await?;
     let bytes_len = tokio::fs::metadata(&abs_output).await?.len() as usize;
-    let rel_output = relative_for_db(&abs_output, &state.config.data_dir);
+    let rel_output = paths::relative_for_db(&abs_output, &state.config.data_dir);
 
     let metadata = serde_json::json!({
         "workflow": job.workflow,
@@ -622,10 +622,4 @@ async fn finalize_output(
         duration_ms = started_at.elapsed().as_millis() as u64,
     );
     Ok(())
-}
-
-fn relative_for_db(abs: &std::path::Path, data_dir: &std::path::Path) -> String {
-    abs.strip_prefix(data_dir)
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| abs.to_string_lossy().into_owned())
 }

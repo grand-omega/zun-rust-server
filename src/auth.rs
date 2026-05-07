@@ -64,15 +64,29 @@ impl AuthLimiter {
     }
 
     fn check_blocked(&self, ip: IpAddr) -> bool {
+        // Use get_mut, NOT entry().or_default(): every authenticated request
+        // would otherwise insert an empty row, growing the map without bound
+        // in steady state. An IP we've never seen is by definition not
+        // blocked, so absence-as-false is correct.
         let mut guard = self.inner.lock();
-        let entry = guard.entry(ip).or_default();
-        entry.is_blocked(Instant::now())
+        match guard.get_mut(&ip) {
+            Some(state) => state.is_blocked(Instant::now()),
+            None => false,
+        }
     }
 
     fn record_failure(&self, ip: IpAddr) -> u32 {
         let mut guard = self.inner.lock();
+        let now = Instant::now();
+        // Bound the map by recent activity rather than all-time IPs: drop
+        // entries whose window has already expired. Cheap because the map is
+        // only as large as the set of IPs failing within the last WINDOW.
+        guard.retain(|_, state| match state.window_start {
+            Some(start) => now.duration_since(start) < WINDOW,
+            None => false,
+        });
         let entry = guard.entry(ip).or_default();
-        entry.record_failure(Instant::now());
+        entry.record_failure(now);
         entry.failures
     }
 }
@@ -177,6 +191,46 @@ mod tests {
             entry.window_start = Some(Instant::now() - (WINDOW + Duration::from_secs(1)));
         }
         assert!(!limiter.check_blocked(ip));
+    }
+
+    #[test]
+    fn check_blocked_does_not_insert_for_unseen_ip() {
+        // Authenticated requests funnel through check_blocked. If that path
+        // inserts an entry, the map grows unbounded in steady state. The
+        // sweep on record_failure only fires on failures, so without this
+        // guarantee the bound regresses silently.
+        let limiter = AuthLimiter::new();
+        let ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1));
+        assert!(!limiter.check_blocked(ip));
+        assert!(
+            limiter.inner.lock().is_empty(),
+            "check_blocked must not materialise an entry for an unseen IP",
+        );
+    }
+
+    #[test]
+    fn limiter_evicts_expired_entries_on_record_failure() {
+        // Build up state for two IPs whose windows have already expired,
+        // then record a failure for a third. Expired entries should be
+        // gone after the call, leaving only the active one.
+        let limiter = AuthLimiter::new();
+        let stale1 = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+        let stale2 = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2));
+        let active = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 3));
+        limiter.record_failure(stale1);
+        limiter.record_failure(stale2);
+        {
+            let mut guard = limiter.inner.lock();
+            for ip in [&stale1, &stale2] {
+                let entry = guard.get_mut(ip).unwrap();
+                entry.window_start = Some(Instant::now() - (WINDOW + Duration::from_secs(1)));
+            }
+        }
+        limiter.record_failure(active);
+        let guard = limiter.inner.lock();
+        assert!(!guard.contains_key(&stale1));
+        assert!(!guard.contains_key(&stale2));
+        assert!(guard.contains_key(&active));
     }
 
     #[test]
