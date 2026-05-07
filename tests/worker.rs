@@ -233,6 +233,59 @@ async fn worker_exits_cleanly_when_idle_on_shutdown() {
 }
 
 #[tokio::test]
+async fn worker_skips_soft_deleted_queued_jobs() {
+    // A queued job that was soft-deleted before the worker drained must not
+    // run on the GPU — pre-fix, fetch_oldest_queued ignored deleted_at.
+    let comfy = MockServer::start().await;
+    // Mount loud-failing mocks: if the worker DOES try to run this job,
+    // an /upload/image call would 500 and the test would observe `failed`.
+    Mock::given(method("POST"))
+        .and(mock_path("/upload/image"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&comfy)
+        .await;
+
+    let mut app = common::test_app_with_comfy(&comfy.uri()).await;
+    let input_id =
+        common::seed_input(&app.db, app._tempdir.path(), &"b".repeat(64), Some(b"x")).await;
+    common::seed_job(
+        &app.db,
+        "soft-deleted",
+        "queued",
+        None,
+        Some("test prompt"),
+        "flux2_klein_edit",
+        input_id,
+        1_700_000_000,
+        None,
+    )
+    .await;
+    sqlx::query("UPDATE jobs SET deleted_at = ? WHERE id = ?")
+        .bind(1_700_000_001_i64)
+        .bind("soft-deleted")
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+    let _handle = common::spawn_worker(&mut app);
+
+    // Give the worker a chance to pick it up. After 500ms it should still
+    // be queued; if the bug regresses, status would flip to running/failed.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let (status, started_at): (String, Option<i64>) =
+        sqlx::query_as("SELECT status, started_at FROM jobs WHERE id = ?")
+            .bind("soft-deleted")
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+    assert_eq!(status, "queued", "soft-deleted job must not be picked up");
+    assert!(
+        started_at.is_none(),
+        "soft-deleted job must never enter running",
+    );
+}
+
+#[tokio::test]
 async fn worker_resets_running_jobs_to_queued_on_startup() {
     let comfy = MockServer::start().await;
     let mut app = common::test_app_with_comfy(&comfy.uri()).await;

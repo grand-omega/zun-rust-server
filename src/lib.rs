@@ -34,6 +34,7 @@ use tower::ServiceBuilder;
 use tower_http::{
     request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
     sensitive_headers::SetSensitiveRequestHeadersLayer,
+    timeout::TimeoutLayer,
     trace::TraceLayer,
 };
 
@@ -41,6 +42,12 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Multipart upload cap for POST /api/v1/jobs.
 pub(crate) const MAX_UPLOAD_BYTES: usize = 20 * 1024 * 1024;
+
+/// Per-request timeout. Bounds slow-loris and stuck handlers; only applies
+/// up to the point the handler returns a Response (streaming body bytes
+/// after that are not constrained). 120s is generous for the 20 MB upload
+/// path on a slow link while still cutting off pathological clients.
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// Cap on user-supplied prompt text (free-form `prompt_text` and stored
 /// `custom_prompts.text`). Generous for natural-language prompts, but
@@ -96,12 +103,18 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
         .merge(authed);
 
+    // ServiceBuilder layer order: first .layer() = OUTERMOST. The propagate
+    // layer must sit OUTSIDE TimeoutLayer so that 408 responses synthesized
+    // by Timeout (which short-circuits inner layers) still get x-request-id
+    // copied onto them — log correlation matters most exactly when a
+    // request times out.
     app.layer(
         ServiceBuilder::new()
             .layer(SetSensitiveRequestHeadersLayer::new(std::iter::once(
                 header::AUTHORIZATION,
             )))
             .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
+            .layer(PropagateRequestIdLayer::x_request_id())
             .layer(
                 TraceLayer::new_for_http().make_span_with(|req: &Request<_>| {
                     let id = req
@@ -117,7 +130,10 @@ pub fn router(state: AppState) -> Router {
                     )
                 }),
             )
-            .layer(PropagateRequestIdLayer::x_request_id()),
+            .layer(TimeoutLayer::with_status_code(
+                axum::http::StatusCode::REQUEST_TIMEOUT,
+                REQUEST_TIMEOUT,
+            )),
     )
 }
 

@@ -61,6 +61,7 @@ pub async fn test_app_with_comfy_and_ws(comfy_url: &str, ws_url: &str) -> TestAp
         worker_tx,
         auth_limiter: AuthLimiter::new(),
         disk_usage_cache: Arc::new(parking_lot::Mutex::new(None)),
+        running_diffusers_cancel: Arc::new(parking_lot::Mutex::new(None)),
     };
     TestApp {
         router: router(state.clone()),

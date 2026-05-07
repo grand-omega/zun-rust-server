@@ -349,7 +349,7 @@ async fn resolve_input(state: &AppState, fields: &SubmitFields) -> Result<i64, A
                 _ => (None, None),
             };
 
-            let rel = relative_for_db(&abs, &state.config.data_dir);
+            let rel = paths::relative_for_db(&abs, &state.config.data_dir);
             let size = upload.bytes.len() as i64;
 
             let id: i64 = if let Some((id, _)) = existing_row {
@@ -391,12 +391,6 @@ async fn resolve_input(state: &AppState, fields: &SubmitFields) -> Result<i64, A
             Ok(id)
         }
     }
-}
-
-fn relative_for_db(abs: &std::path::Path, data_dir: &std::path::Path) -> String {
-    abs.strip_prefix(data_dir)
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| abs.to_string_lossy().into_owned())
 }
 
 // --------------------------- GET /api/v1/jobs ----------------------------
@@ -622,9 +616,21 @@ pub async fn cancel_job(
     if res.rows_affected() == 0 {
         return Err(AppError::NotFound);
     }
-    // Best-effort interrupt of ComfyUI. If the job was queued and never made
-    // it to the GPU, the interrupt is a harmless no-op. If it was running,
-    // this stops the GPU work immediately. Either way we've already
+    // Diffusers path: SIGKILL the in-flight python runner via the cancel
+    // channel the worker registered. No-op if this job isn't the one
+    // currently in the Diffusers branch.
+    let diffusers_signal = {
+        let mut guard = state.running_diffusers_cancel.lock();
+        match guard.as_ref() {
+            Some(c) if c.job_id == job_id => guard.take(),
+            _ => None,
+        }
+    };
+    if let Some(entry) = diffusers_signal {
+        let _ = entry.tx.send(());
+    }
+    // ComfyUI path: best-effort /interrupt. If the job was queued and never
+    // made it to the GPU, this is a harmless no-op. Either way we've already
     // transitioned the row, so the worker's downstream mark_failed (which is
     // gated on status='running') will be a no-op too.
     if let Err(e) = state.comfy.interrupt().await {
