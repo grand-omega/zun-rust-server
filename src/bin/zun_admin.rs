@@ -193,5 +193,6 @@ async fn build_state(
         worker_tx,
         auth_limiter: zun_rust_server::auth::AuthLimiter::new(),
         disk_usage_cache: std::sync::Arc::new(parking_lot::Mutex::new(None)),
+        running_diffusers_cancel: std::sync::Arc::new(parking_lot::Mutex::new(None)),
     })
 }

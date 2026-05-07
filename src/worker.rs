@@ -17,12 +17,13 @@ use std::{process::Stdio, time::Duration};
 use sqlx::SqlitePool;
 use tokio::{
     process::Command,
-    sync::{mpsc, watch},
+    sync::{mpsc, oneshot, watch},
 };
 
 use crate::{
     AppState, comfy,
     paths::{self, subdir},
+    state::DiffusersCancel,
     workflow,
 };
 
@@ -105,9 +106,13 @@ struct QueuedJob {
 }
 
 async fn fetch_oldest_queued(db: &SqlitePool) -> anyhow::Result<Option<QueuedJob>> {
+    // Skip soft-deleted rows: a DELETE on a queued job leaves status='queued'
+    // but flips deleted_at — without this filter the worker would still pick
+    // it up and burn GPU on output the user can't read back.
     let row = sqlx::query_as::<_, QueuedJob>(
         "SELECT id, input_id, prompt_text, workflow, timeout_seconds, seed \
-         FROM jobs WHERE status = 'queued' ORDER BY created_at ASC LIMIT 1",
+         FROM jobs WHERE status = 'queued' AND deleted_at IS NULL \
+         ORDER BY created_at ASC LIMIT 1",
     )
     .fetch_optional(db)
     .await?;
@@ -115,9 +120,14 @@ async fn fetch_oldest_queued(db: &SqlitePool) -> anyhow::Result<Option<QueuedJob
 }
 
 async fn reset_running_jobs(db: &SqlitePool) -> anyhow::Result<()> {
-    let result = sqlx::query("UPDATE jobs SET status = 'queued' WHERE status = 'running'")
-        .execute(db)
-        .await?;
+    // Also clear per-attempt state from the prior crashed run so duration
+    // math and audit logs reflect the new attempt, not the dead one.
+    let result = sqlx::query(
+        "UPDATE jobs SET status = 'queued', started_at = NULL, comfy_prompt_id = NULL, error_message = NULL \
+         WHERE status = 'running'",
+    )
+    .execute(db)
+    .await?;
     let n = result.rows_affected();
     if n > 0 {
         tracing::warn!(n, "reset orphaned running jobs to queued on startup");
@@ -131,9 +141,11 @@ async fn reset_running_jobs(db: &SqlitePool) -> anyhow::Result<()> {
 /// when this returns false.
 async fn mark_running(db: &SqlitePool, job_id: &str) -> anyhow::Result<bool> {
     let now = chrono::Utc::now().timestamp();
+    // Also gate on deleted_at: closes the small window between
+    // fetch_oldest_queued and here in case the row got soft-deleted in between.
     let res = sqlx::query(
         "UPDATE jobs SET status = 'running', started_at = ? \
-         WHERE id = ? AND status = 'queued'",
+         WHERE id = ? AND status = 'queued' AND deleted_at IS NULL",
     )
     .bind(now)
     .bind(job_id)
@@ -395,9 +407,9 @@ async fn process_flux2_klein_9b_kv_diffusers(
     );
 
     // Spawn (not output()) so we own the Child and can bound it with a
-    // timeout. kill_on_drop sends SIGKILL if the timeout future is dropped
-    // before the wait future resolves — without this, a hung python runner
-    // wedges the worker forever.
+    // timeout. kill_on_drop sends SIGKILL if the wait future is dropped
+    // before it resolves — without this, a hung python runner wedges the
+    // worker forever, and a user-cancellation can't reclaim the GPU.
     let child = Command::new("uv")
         .current_dir(&project_root)
         .arg("run")
@@ -422,14 +434,35 @@ async fn process_flux2_klein_9b_kv_diffusers(
         .kill_on_drop(true)
         .spawn()?;
 
-    let output = match tokio::time::timeout(
-        Duration::from_secs(timeout_seconds),
-        child.wait_with_output(),
-    )
-    .await
+    // Register a cancel channel so cancel_job can SIGKILL the runner. The
+    // guard deregisters on drop (covers early returns / panics).
+    let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
     {
-        Ok(res) => res?,
-        Err(_) => anyhow::bail!("Diffusers 9B-KV runner timed out after {timeout_seconds}s"),
+        let mut guard = state.running_diffusers_cancel.lock();
+        *guard = Some(DiffusersCancel {
+            job_id: job.id.clone(),
+            tx: cancel_tx,
+        });
+    }
+    let _cancel_guard = DiffusersCancelGuard {
+        state,
+        job_id: &job.id,
+    };
+
+    let output = tokio::select! {
+        biased;
+        _ = cancel_rx => {
+            // Selecting this branch drops the wait future below, which drops
+            // the Child; kill_on_drop then SIGKILLs the python runner.
+            anyhow::bail!("Diffusers 9B-KV runner cancelled by user");
+        }
+        res = tokio::time::timeout(
+            Duration::from_secs(timeout_seconds),
+            child.wait_with_output(),
+        ) => match res {
+            Ok(out) => out?,
+            Err(_) => anyhow::bail!("Diffusers 9B-KV runner timed out after {timeout_seconds}s"),
+        },
     };
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -474,6 +507,25 @@ async fn process_flux2_klein_9b_kv_diffusers(
     paths::atomic_write(&sidecar, &serde_json::to_vec_pretty(&metadata)?).await?;
 
     finalize_output(state, job, &abs_output, &rel_output, bytes_len, started_at).await
+}
+
+/// RAII guard: clears the `running_diffusers_cancel` slot when dropped, but
+/// only if the slot still names *this* job. A successful cancel from
+/// `cancel_job` already takes the entry, so we'd find None — that's fine.
+struct DiffusersCancelGuard<'a> {
+    state: &'a AppState,
+    job_id: &'a str,
+}
+
+impl Drop for DiffusersCancelGuard<'_> {
+    fn drop(&mut self) {
+        let mut guard = self.state.running_diffusers_cancel.lock();
+        if let Some(c) = guard.as_ref()
+            && c.job_id == self.job_id
+        {
+            *guard = None;
+        }
+    }
 }
 
 async fn find_single_png(dir: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
