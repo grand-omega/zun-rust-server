@@ -14,6 +14,7 @@ base64 = "0.22.1"
 chrono = { version = "0.4.44", features = ["serde"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
+include_dir = "0.7"
 ipnet = { version = "2.10", features = ["serde"] }
 parking_lot = "0.12.5"
 rand = "0.10.1"

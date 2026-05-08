@@ -1,14 +1,21 @@
 //! ComfyUI workflow template loading and placeholder substitution.
 //!
-//! Templates are opaque JSON blobs owned by the sibling project-zun repo
-//! (see `doc/WORKFLOWS.md` there for the full placeholder contract). This
-//! module loads them and performs **whole-string** substitution on known
-//! placeholder tokens. Substring matches are intentional non-matches:
-//! `PROMPT_PLACEHOLDER` must occupy an entire JSON string value.
+//! Templates are opaque JSON blobs authored in the sibling
+//! `zun-flux-pipeline` repo (see its `doc/WORKFLOWS.md` for the full
+//! placeholder contract) and vendored into `workflows/` at the repo root.
+//! `include_dir!` bakes them into the binary so a `cargo install`'d build
+//! is self-contained; an on-disk `workflows_dir` config knob is honored as
+//! a dev override. This module performs **whole-string** substitution on
+//! known placeholder tokens — substring matches are intentional
+//! non-matches: `PROMPT_PLACEHOLDER` must occupy an entire JSON string
+//! value.
 use std::{collections::HashMap, path::Path};
 
+use include_dir::{Dir, include_dir};
 use serde::Serialize;
 use serde_json::Value;
+
+static EMBEDDED_WORKFLOWS: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/workflows");
 
 // --- Placeholder tokens (mirrors project-zun/doc/WORKFLOWS.md). -----------
 
@@ -163,8 +170,11 @@ pub fn build_edit_workflow(
     out
 }
 
+/// Load enabled workflows. When `dir_override` is `Some`, templates are
+/// read from that directory (dev override); otherwise they come from the
+/// `include_dir!`-baked set vendored at `workflows/`.
 pub fn load_registry(
-    dir: &Path,
+    dir_override: Option<&Path>,
     enabled_workflows: &[String],
     default_workflow: &str,
 ) -> anyhow::Result<WorkflowRegistry> {
@@ -172,7 +182,10 @@ pub fn load_registry(
     let mut support = HashMap::new();
 
     for name in enabled_workflows {
-        let template = load_template(dir, name)?;
+        let template = match dir_override {
+            Some(d) => load_template(d, name)?,
+            None => load_embedded_template(name)?,
+        };
         templates.insert(name.clone(), template);
         support.insert(name.clone(), workflow_support(name, default_workflow));
     }
@@ -323,15 +336,32 @@ pub fn patch_seed_placeholder(value: &mut Value, seed: i64) {
     walk(value, seed);
 }
 
-/// Load a single explicitly-enabled workflow JSON by name.
+/// Load a single explicitly-enabled workflow JSON by name from disk.
 pub fn load_template(dir: &Path, name: &str) -> anyhow::Result<Value> {
-    if name.is_empty() || name.contains('/') || name.contains('\\') || name.contains("..") {
-        anyhow::bail!("invalid workflow name: {name:?}");
-    }
+    validate_name(name)?;
     let path = dir.join(format!("{name}.json"));
     let raw = std::fs::read_to_string(&path)
         .map_err(|e| anyhow::anyhow!("read {}: {e}", path.display()))?;
     serde_json::from_str(&raw).map_err(|e| anyhow::anyhow!("parse {}: {e}", path.display()))
+}
+
+fn load_embedded_template(name: &str) -> anyhow::Result<Value> {
+    validate_name(name)?;
+    let filename = format!("{name}.json");
+    let file = EMBEDDED_WORKFLOWS
+        .get_file(&filename)
+        .ok_or_else(|| anyhow::anyhow!("embedded workflow not found: {filename}"))?;
+    let raw = file
+        .contents_utf8()
+        .ok_or_else(|| anyhow::anyhow!("embedded {filename} is not valid UTF-8"))?;
+    serde_json::from_str(raw).map_err(|e| anyhow::anyhow!("parse embedded {filename}: {e}"))
+}
+
+fn validate_name(name: &str) -> anyhow::Result<()> {
+    if name.is_empty() || name.contains('/') || name.contains('\\') || name.contains("..") {
+        anyhow::bail!("invalid workflow name: {name:?}");
+    }
+    Ok(())
 }
 
 // --- tests --------------------------------------------------------------
@@ -450,19 +480,11 @@ mod tests {
     }
 
     #[test]
-    fn load_template_loads_real_workflow() {
-        // This test asserts the contract with project-zun: when the symlink
-        // is present, the configured workflow loads cleanly. Skipped if the
-        // symlink isn't set up in the dev env.
-        let dir = std::path::Path::new("data/workflows");
-        if !dir.exists() {
-            eprintln!("data/workflows symlink missing; skipping real-template test");
-            return;
-        }
-        let loaded = load_template(dir, "flux2_klein_edit").expect("load template");
-        // Real workflow must still contain a PROMPT placeholder (the
-        // contract). If this fails, either the symlink points somewhere
-        // unexpected or project-zun's contract changed.
+    fn embedded_template_loads_and_carries_placeholders() {
+        // The vendored workflow under `workflows/flux2_klein_edit.json` is
+        // the contract with zun-flux-pipeline. If this fails, either the
+        // file moved or the upstream placeholder contract changed.
+        let loaded = load_embedded_template("flux2_klein_edit").expect("load embedded");
         let body = loaded.to_string();
         assert!(body.contains("PROMPT_PLACEHOLDER"));
         assert!(body.contains("INPUT_IMAGE_PLACEHOLDER"));

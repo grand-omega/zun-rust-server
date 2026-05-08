@@ -15,8 +15,10 @@ pub struct Config {
     pub comfy_url: String,
     #[serde(default = "default_data_dir")]
     pub data_dir: PathBuf,
-    /// Directory holding the ComfyUI workflow templates (`*.json`).
-    /// Defaults to `<data_dir>/workflows` when unset.
+    /// Optional override directory holding the ComfyUI workflow templates
+    /// (`*.json`). When unset, the templates baked into the binary at
+    /// build time (`workflows/` in the repo root) are used. Set this only
+    /// to point at an on-disk copy during workflow authoring.
     #[serde(default)]
     pub workflows_dir: Option<PathBuf>,
     /// Workflow selected by default in capability responses.
@@ -88,10 +90,7 @@ fn default_workflow() -> String {
     "flux2_klein_edit".into()
 }
 fn default_enabled_workflows() -> Vec<String> {
-    vec![
-        "flux2_klein_edit".into(),
-        "flux2_klein_9b_kv_experimental".into(),
-    ]
+    vec!["flux2_klein_edit".into()]
 }
 
 /// Log output format. Defaults to `auto` (pretty when stderr is a TTY, JSON otherwise).
@@ -119,13 +118,5 @@ impl Config {
             anyhow::bail!("token must be at least 16 characters");
         }
         Ok(config)
-    }
-
-    /// Resolved workflow templates directory: explicit `workflows_dir` if set,
-    /// otherwise `<data_dir>/workflows`.
-    pub fn resolved_workflows_dir(&self) -> PathBuf {
-        self.workflows_dir
-            .clone()
-            .unwrap_or_else(|| self.data_dir.join("workflows"))
     }
 }

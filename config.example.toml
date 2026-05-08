@@ -35,11 +35,12 @@ comfy_url = "http://127.0.0.1:8188"
 # Where jobs.db, inputs/, outputs/, and thumbs/ are stored.
 data_dir = "./data"
 
-# Directory holding ComfyUI workflow templates (`*.json`). Authored in the
-# sibling project-zun repo; the server loads them at startup. If unset,
-# defaults to `<data_dir>/workflows`. Set this when project-zun lives on
-# a different host or path than this server's data_dir.
-# workflows_dir = "/path/to/project-zun/workflows"
+# Optional override directory holding ComfyUI workflow templates
+# (`*.json`). When unset, the templates baked into the binary at build
+# time (`workflows/` in the source tree) are used. Set this only to point
+# at an on-disk copy during workflow authoring — `cargo build` re-bakes
+# whatever's in `workflows/` automatically.
+# workflows_dir = "/path/to/zun-flux-pipeline/workflows"
 
 # Explicit workflows exposed to Android. Each must have a matching
 # `<name>.json` in workflows_dir.

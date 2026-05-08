@@ -36,9 +36,10 @@ All config lives in `config.toml` (gitignored). Copy from `config.example.toml`:
 | `bind` | `127.0.0.1:8080` | Listen address — server speaks plain HTTP behind a reverse proxy |
 | `trusted_proxies` | `["127.0.0.1", "::1"]` | Peer IPs / CIDRs whose `X-Forwarded-For` is trusted as the real client IP (e.g. `"100.64.0.0/10"` for a tailnet) |
 | `comfy_url` | `http://127.0.0.1:8188` | ComfyUI HTTP base |
-| `data_dir` | `./data` | Houses `jobs.db`, `{cache,outputs,thumbs,previews}/`, and the `workflows/` symlink |
+| `data_dir` | `./data` | Houses `jobs.db` and `{cache,outputs,thumbs,previews}/` |
+| `workflows_dir` | unset | Optional override pointing at an on-disk workflow templates dir; unset means use the templates baked into the binary |
 | `default_workflow` | `flux2_klein_edit` | Default workflow advertised to Android |
-| `enabled_workflows` | `flux2_klein_edit`, `flux2_klein_9b_kv_experimental` | Explicit workflow names exposed by the server |
+| `enabled_workflows` | `flux2_klein_edit` | Explicit workflow names exposed by the server |
 | `log_format` | `auto` | `auto` (pretty on TTY, JSON otherwise), `pretty`, or `json` |
 
 `RUST_LOG` env var still works for log-level tuning (e.g. `RUST_LOG=debug`).
@@ -58,11 +59,17 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-Workflow templates live in project-zun and are consumed via a symlink:
+Workflow templates are vendored at `workflows/` (sibling of `src/`) and
+baked into the binary at compile time via `include_dir!`. To pull updates
+from the authoring repo (`zun-flux-pipeline`):
 
 ```bash
-ln -s ../../project-zun/workflows data/workflows
+just sync-workflows                          # default ../zun-flux-pipeline/workflows
+just sync-workflows /path/to/workflows       # explicit override
 ```
+
+Then `cargo build` to rebuild with the new templates. To iterate without
+rebuilding, point `workflows_dir` in `config.toml` at an on-disk copy.
 
 ## Architecture
 

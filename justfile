@@ -35,3 +35,21 @@ setup:
         echo "wrote config.toml — edit it: set token and bind address."
     fi
     echo "next: cargo run"
+
+# Pull the latest workflow JSONs from the authoring repo into vendored
+# `workflows/`. This is the workflow author's update step — `cargo build`
+# bakes whatever's in `workflows/` into the binary via include_dir!.
+# Override the source with: `just sync-workflows /path/to/workflows`.
+sync-workflows src="../zun-flux-pipeline/workflows":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ ! -d "{{src}}" ]]; then
+        echo "error: source dir {{src}} does not exist" >&2
+        exit 1
+    fi
+    rm -f workflows/*.json workflows/MANIFEST.yaml
+    cp "{{src}}"/*.json workflows/
+    if [[ -f "{{src}}/MANIFEST.yaml" ]]; then
+        cp "{{src}}/MANIFEST.yaml" workflows/
+    fi
+    echo "synced workflows from {{src}}; rebuild to pick them up."
