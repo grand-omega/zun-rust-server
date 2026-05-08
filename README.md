@@ -2,7 +2,7 @@
 
 A personal Rust server wrapping [project-zun](https://github.com/grand-omega/project-zun)'s ComfyUI + FLUX2 setup for a single-user Android client. Handles job orchestration, persistence, and an HTTP API the app drives.
 
-Single-user, self-hosted. Runs on home LAN or Tailscale — no special network setup required.
+Single-user, self-hosted. Plain HTTP backend designed to live behind a reverse proxy (Caddy, nginx, Tailscale Serve, etc.) that terminates TLS.
 
 ## Status
 
@@ -17,7 +17,6 @@ Prerequisites:
 ```bash
 cp config.example.toml config.toml   # then edit: set token, bind address
 cargo run                            # creates data/jobs.db with the v2 schema
-cargo run --bin zun-admin -- seed-prompts --from starter_prompts.toml
 ```
 
 Hit `/api/v1/health` to verify:
@@ -34,7 +33,8 @@ All config lives in `config.toml` (gitignored). Copy from `config.example.toml`:
 | Key | Default | Purpose |
 |---|---|---|
 | `token` | — (required) | Bearer token for the Android client |
-| `bind` | `0.0.0.0:8080` | Listen address — works on LAN and Tailscale simultaneously |
+| `bind` | `127.0.0.1:8080` | Listen address — server speaks plain HTTP behind a reverse proxy |
+| `trusted_proxies` | `["127.0.0.1", "::1"]` | Peer IPs whose `X-Forwarded-For` is trusted as the real client IP |
 | `comfy_url` | `http://127.0.0.1:8188` | ComfyUI HTTP base |
 | `data_dir` | `./data` | Houses `jobs.db`, `{cache,outputs,thumbs,previews}/`, and the `workflows/` symlink |
 | `default_workflow` | `flux2_klein_edit` | Default workflow advertised to Android |
@@ -75,7 +75,7 @@ ln -s ../../project-zun/workflows data/workflows
 
 ## Security
 
-Network boundary is the primary auth layer. On Tailscale, only enrolled devices can reach the server. On home LAN, only devices on the local network. A bearer token (`config.toml: token`) provides a second layer.
+The server speaks plain HTTP and assumes a reverse proxy in front terminates TLS and gates network access (firewall, overlay-network membership, Caddy `@allowed` matchers, whatever fits your topology). The bearer token (`config.toml: token`) is the application-layer second factor. Failed auth attempts are throttled per client IP via a sliding window; behind a proxy this requires `trusted_proxies` to include the proxy's peer IP so `X-Forwarded-For` is honored.
 
 ## Roadmap
 

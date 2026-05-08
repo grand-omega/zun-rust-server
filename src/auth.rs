@@ -7,7 +7,7 @@ use std::{
 
 use axum::{
     extract::{ConnectInfo, Request, State},
-    http::header::AUTHORIZATION,
+    http::header::{AUTHORIZATION, HeaderName},
     middleware::Next,
     response::Response,
 };
@@ -21,6 +21,7 @@ use crate::{AppError, AppState};
 /// the window elapses without new failures.
 const WINDOW: Duration = Duration::from_secs(60);
 const MAX_FAILURES: u32 = 10;
+const X_FORWARDED_FOR: HeaderName = HeaderName::from_static("x-forwarded-for");
 
 #[derive(Debug, Default)]
 struct FailState {
@@ -96,10 +97,38 @@ fn token_eq(a: &str, b: &str) -> bool {
     a.as_bytes().ct_eq(b.as_bytes()).into()
 }
 
-fn peer_ip(req: &Request) -> Option<IpAddr> {
-    req.extensions()
+/// Returns the client IP for limiter / audit purposes. The TCP peer is
+/// the primary source. When the peer matches a configured trusted proxy,
+/// the leftmost hop of `X-Forwarded-For` is used instead so that
+/// per-client throttling and logs survive a reverse proxy.
+///
+/// XFF from an untrusted peer is ignored — it's just a request header
+/// any client can set.
+fn peer_ip(req: &Request, trusted_proxies: &[IpAddr]) -> Option<IpAddr> {
+    let direct = req
+        .extensions()
         .get::<ConnectInfo<SocketAddr>>()
-        .map(|c| c.0.ip())
+        .map(|c| c.0.ip())?;
+
+    if trusted_proxies.contains(&direct)
+        && let Some(forwarded) = req
+            .headers()
+            .get(&X_FORWARDED_FOR)
+            .and_then(|value| value.to_str().ok())
+            .and_then(first_forwarded_ip)
+    {
+        return Some(forwarded);
+    }
+
+    Some(direct)
+}
+
+fn first_forwarded_ip(value: &str) -> Option<IpAddr> {
+    value
+        .split(',')
+        .next()
+        .map(str::trim)
+        .and_then(|ip| ip.parse().ok())
 }
 
 /// Rejects any request missing or presenting a non-matching
@@ -111,7 +140,7 @@ pub async fn require_bearer(
     next: Next,
 ) -> Result<Response, AppError> {
     let path = req.uri().path().to_string();
-    let ip = peer_ip(&req);
+    let ip = peer_ip(&req, &state.config.trusted_proxies);
 
     // Fast path: if this IP is already blocked, short-circuit before
     // reading the header at all.
@@ -165,7 +194,19 @@ fn record_failure(state: &AppState, ip: Option<IpAddr>, path: &str, reason: &'st
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::Ipv4Addr;
+    use axum::{body::Body, http::Request};
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    fn req_with(peer: IpAddr, xff: Option<&str>) -> Request<Body> {
+        let mut builder = Request::builder();
+        if let Some(value) = xff {
+            builder = builder.header("x-forwarded-for", value);
+        }
+        let mut req = builder.body(Body::empty()).unwrap();
+        req.extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from((peer, 49152))));
+        req
+    }
 
     #[test]
     fn limiter_blocks_after_max_failures_and_unblocks_after_window() {
@@ -244,5 +285,83 @@ mod tests {
         assert!(limiter.check_blocked(a));
         // B has no failures recorded — must not be blocked by A's failures.
         assert!(!limiter.check_blocked(b));
+    }
+
+    #[test]
+    fn first_forwarded_ip_uses_leftmost_hop() {
+        assert_eq!(
+            first_forwarded_ip("203.0.113.10, 127.0.0.1"),
+            Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10))),
+        );
+        assert_eq!(
+            first_forwarded_ip("  198.51.100.5  ,10.0.0.1"),
+            Some(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 5))),
+        );
+        assert_eq!(first_forwarded_ip("not-an-ip, 203.0.113.10"), None);
+        assert_eq!(first_forwarded_ip(""), None);
+    }
+
+    #[test]
+    fn peer_ip_returns_direct_when_trusted_list_is_empty() {
+        // Empty trusted_proxies = "no proxy in front." XFF must be ignored.
+        let trusted: Vec<IpAddr> = vec![];
+        let req = req_with(IpAddr::V4(Ipv4Addr::LOCALHOST), Some("203.0.113.10"));
+        assert_eq!(
+            peer_ip(&req, &trusted),
+            Some(IpAddr::V4(Ipv4Addr::LOCALHOST))
+        );
+    }
+
+    #[test]
+    fn peer_ip_trusts_xff_only_when_peer_is_in_list() {
+        let trusted = vec![IpAddr::V4(Ipv4Addr::LOCALHOST)];
+        let req = req_with(IpAddr::V4(Ipv4Addr::LOCALHOST), Some("203.0.113.10"));
+        assert_eq!(
+            peer_ip(&req, &trusted),
+            Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10))),
+        );
+
+        // Peer NOT in trusted list — XFF must be ignored even though present.
+        let req = req_with(
+            IpAddr::V4(Ipv4Addr::new(198, 51, 100, 20)),
+            Some("203.0.113.10"),
+        );
+        assert_eq!(
+            peer_ip(&req, &trusted),
+            Some(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 20))),
+        );
+    }
+
+    #[test]
+    fn peer_ip_supports_off_host_proxy_via_lan_ip() {
+        // Topology: Caddy on a LAN box (192.168.1.5) reverse-proxies to this
+        // server bound on 192.168.1.10. trusted_proxies tells us the proxy.
+        let proxy = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 5));
+        let trusted = vec![proxy];
+        let req = req_with(proxy, Some("203.0.113.10"));
+        assert_eq!(
+            peer_ip(&req, &trusted),
+            Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10))),
+        );
+    }
+
+    #[test]
+    fn peer_ip_falls_back_to_peer_when_xff_missing() {
+        let trusted = vec![IpAddr::V4(Ipv4Addr::LOCALHOST)];
+        let req = req_with(IpAddr::V4(Ipv4Addr::LOCALHOST), None);
+        assert_eq!(
+            peer_ip(&req, &trusted),
+            Some(IpAddr::V4(Ipv4Addr::LOCALHOST))
+        );
+    }
+
+    #[test]
+    fn peer_ip_handles_ipv6_loopback_proxy() {
+        let trusted = vec![IpAddr::V6(Ipv6Addr::LOCALHOST)];
+        let req = req_with(IpAddr::V6(Ipv6Addr::LOCALHOST), Some("2001:db8::1"));
+        assert_eq!(
+            peer_ip(&req, &trusted),
+            Some(IpAddr::V6("2001:db8::1".parse().unwrap())),
+        );
     }
 }

@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    path::{Path, PathBuf},
+};
 
 use serde::Deserialize;
 
@@ -28,10 +31,23 @@ pub struct Config {
     pub diffusers_model_path: Option<PathBuf>,
     #[serde(default)]
     pub log_format: LogFormat,
+    /// IPs of reverse proxies whose `X-Forwarded-For` we trust. The peer IP
+    /// of an incoming connection is checked against this list; if it
+    /// matches, the leftmost XFF hop is used as the real client IP for
+    /// auth-failure rate limiting and audit logs. Empty list means
+    /// "no proxy in front" — the raw TCP peer is always used.
+    #[serde(default = "default_trusted_proxies")]
+    pub trusted_proxies: Vec<IpAddr>,
 }
 
 fn default_bind() -> String {
-    "0.0.0.0:8080".into()
+    "127.0.0.1:8080".into()
+}
+fn default_trusted_proxies() -> Vec<IpAddr> {
+    vec![
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        IpAddr::V6(Ipv6Addr::LOCALHOST),
+    ]
 }
 fn default_comfy_url() -> String {
     "http://127.0.0.1:8188".into()

@@ -48,6 +48,7 @@ pub async fn test_app_with_comfy_and_ws(comfy_url: &str, ws_url: &str) -> TestAp
         token: TEST_TOKEN.to_string(),
         comfy_url: comfy_url.to_string(),
         log_format: zun_rust_server::config::LogFormat::Auto,
+        trusted_proxies: vec![],
     };
     let comfy = ComfyClient::with_ws_base(comfy_url, ws_url).expect("comfy client");
     let (worker_tx, worker_rx) = mpsc::channel::<()>(1);

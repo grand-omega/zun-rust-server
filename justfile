@@ -35,8 +35,3 @@ setup:
         echo "wrote config.toml — edit it: set token and bind address."
     fi
     echo "next: cargo run"
-    echo "then: just seed-prompts"
-
-# Seed the starter prompts into the default admin user.
-seed-prompts:
-    cargo run --bin zun-admin -- seed-prompts admin --from starter_prompts.toml

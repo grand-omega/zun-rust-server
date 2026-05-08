@@ -163,8 +163,8 @@ pub async fn run(state: &AppState, opts: PurgeOpts) -> anyhow::Result<PurgeRepor
     Ok(report)
 }
 
-/// Pool-only entrypoint that skips file IO. Useful for fast tests and the
-/// dry-run path of zun-admin's purge subcommand when no AppState is handy.
+/// Pool-only entrypoint that skips file IO. Useful for fast tests where no
+/// AppState is handy.
 #[allow(dead_code)]
 pub async fn run_with_pool(
     pool: &sqlx::SqlitePool,
