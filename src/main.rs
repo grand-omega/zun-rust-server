@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
 use zun_rust_server::{
@@ -8,7 +9,8 @@ use zun_rust_server::{
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let config = Config::load()?;
+    let config_path = parse_config_path()?;
+    let config = Config::load(&config_path)?;
     logging::init(config.log_format)?;
     // Identify the token by a sha256 prefix rather than dumping its bytes;
     // log files end up in journals, screenshots, and bug reports.
@@ -92,6 +94,24 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("zun-rust-server exited cleanly");
     Ok(())
+}
+
+/// Tiny hand-rolled flag parser. Looks for `--config <path>`; falls back
+/// to `./config.toml`. Avoids pulling in clap for one knob.
+fn parse_config_path() -> anyhow::Result<PathBuf> {
+    let mut args = std::env::args().skip(1);
+    let Some(arg) = args.next() else {
+        return Ok(PathBuf::from("config.toml"));
+    };
+    match arg.as_str() {
+        "--config" => {
+            let path = args
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("--config requires a path argument"))?;
+            Ok(PathBuf::from(path))
+        }
+        other => anyhow::bail!("unknown argument: {other}"),
+    }
 }
 
 async fn wait_for_shutdown_signal() {

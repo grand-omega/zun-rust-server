@@ -12,12 +12,26 @@ Single-user, self-hosted. Plain HTTP backend designed to live behind a reverse p
 
 Prerequisites:
 - Rust stable via [`rustup`](https://rustup.rs/)
-- ComfyUI running from `project-zun` (`just serve` there)
+- ComfyUI running from `zun-flux-pipeline` (`just serve` there)
+
+Dev (from the repo root, finds `./config.toml`):
 
 ```bash
 cp config.example.toml config.toml   # then edit: set token, bind address
 cargo run                            # creates data/jobs.db with the v2 schema
 ```
+
+Installed (binary anywhere, config anywhere):
+
+```bash
+cargo install --path .
+zun-rust-server --config /etc/zun/config.toml
+```
+
+Relative paths in `config.toml` (`data_dir`, `workflows_dir`) are
+resolved against the config file's parent directory, not the current
+working directory — a `cargo install`'d binary works the same regardless
+of where you run it from.
 
 Hit `/api/v1/health` to verify:
 

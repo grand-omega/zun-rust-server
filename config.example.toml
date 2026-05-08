@@ -33,6 +33,9 @@ trusted_proxies = ["127.0.0.1", "::1"]
 comfy_url = "http://127.0.0.1:8188"
 
 # Where jobs.db, inputs/, outputs/, and thumbs/ are stored.
+# Relative paths are resolved against this config file's directory, not
+# the current working directory — so a `cargo install`'d binary lands
+# state in a predictable spot no matter where you invoke it from.
 data_dir = "./data"
 
 # Optional override directory holding ComfyUI workflow templates

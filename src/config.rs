@@ -104,19 +104,45 @@ pub enum LogFormat {
 }
 
 impl Config {
-    pub fn load() -> anyhow::Result<Self> {
-        Self::from_file("config.toml")
-    }
-
-    pub fn from_file(path: impl AsRef<Path>) -> anyhow::Result<Self> {
-        let path = path.as_ref();
-        let text = std::fs::read_to_string(path)
-            .map_err(|e| anyhow::anyhow!("cannot read {}: {}", path.display(), e))?;
-        let config: Self = toml::from_str(&text)
+    /// Read a config from disk and resolve relative paths against the
+    /// config file's parent directory. The latter is what makes
+    /// `cargo install`'d binaries work from arbitrary CWDs: a value like
+    /// `data_dir = "./data"` consistently means "next to config.toml",
+    /// not "next to wherever the user happens to be `cd`'d."
+    pub fn load(path: &Path) -> anyhow::Result<Self> {
+        let text = std::fs::read_to_string(path).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                anyhow::anyhow!(missing_config_message(path))
+            } else {
+                anyhow::anyhow!("cannot read {}: {}", path.display(), e)
+            }
+        })?;
+        let mut config: Self = toml::from_str(&text)
             .map_err(|e| anyhow::anyhow!("invalid {}: {}", path.display(), e))?;
         if config.token.len() < 16 {
             anyhow::bail!("token must be at least 16 characters");
         }
+        let base = path.parent().unwrap_or_else(|| Path::new("."));
+        if config.data_dir.is_relative() {
+            config.data_dir = base.join(&config.data_dir);
+        }
+        if let Some(ref dir) = config.workflows_dir
+            && dir.is_relative()
+        {
+            config.workflows_dir = Some(base.join(dir));
+        }
         Ok(config)
     }
+}
+
+fn missing_config_message(path: &Path) -> String {
+    format!(
+        "config file not found at {p}\n\
+         to create one:\n  \
+           cp config.example.toml config.toml\n  \
+           # then edit it: set `token`\n\
+         or supply an explicit path:\n  \
+           zun-rust-server --config /path/to/config.toml",
+        p = path.display(),
+    )
 }
