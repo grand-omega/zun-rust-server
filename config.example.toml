@@ -1,56 +1,75 @@
-# Copy to config.toml (gitignored) and fill in your values.
-# Quickest start: cp config.example.toml config.toml, then set token.
-
-# Bearer token the Android app sends as `Authorization: Bearer <token>`.
-# Must be at least 16 characters. Generate one with:
-#   openssl rand -hex 32
-token = "1111111111111111"
-
-# Address the server listens on. The server speaks plain HTTP behind a
-# reverse proxy that terminates TLS — same-host proxy is the default and
-# recommended setup. 127.0.0.1:8080 means only the local proxy can reach
-# the backend; nothing else on the network can.
+# zun-rust-server config.
 #
-# Other shapes (uncommon):
-#   <lan-ip>:8080       proxy on a different host on the same LAN
-#   <tailnet-ip>:8080   proxy on a different node in the same tailnet
-#   0.0.0.0:8080        debug only — direct exposure with NO TLS
-bind = "127.0.0.1:8080"
-
-# Reverse proxies whose `X-Forwarded-For` header is trusted as the real
-# client IP for auth-failure rate limiting and audit logs. XFF from any
-# peer NOT in this list is ignored — it's just a request header any
-# client can set, so trust must be gated by the TCP peer.
+# Setup:  cp config.example.toml config.toml
+#         openssl rand -hex 32   # paste output as `token`
+#         cargo run              # dev
+#         zun-rust-server --config /etc/zun-rust-server/config.toml   # prod
 #
-# Each entry is a plain IP (implicit /32 or /128) or a CIDR range. The
-# default covers a same-host proxy. Examples:
-#   "192.168.1.5"        single proxy on the same LAN
-#   "100.64.0.0/10"      any peer in the Tailscale CGNAT range
-#   "172.16.0.0/12"      any peer on a Docker bridge network
-trusted_proxies = ["127.0.0.1", "::1"]
+# Two profiles below — DEV is active, PROD is commented. Swap the comment
+# markers to switch.
+#
+# Relative paths (data_dir) resolve against THIS file's directory.
 
-# ComfyUI HTTP endpoint (project-zun's `just serve` default).
+# --- DEV (phone on LAN, no proxy) -----------------------------------------
+token = "1111111111111111111111111111111111111111111111111111111111111111"
+bind = "0.0.0.0:8080"
+trusted_proxies = []
 comfy_url = "http://127.0.0.1:8188"
-
-# Where jobs.db, inputs/, outputs/, and thumbs/ are stored.
-# Relative paths are resolved against this config file's directory, not
-# the current working directory — so a `cargo install`'d binary lands
-# state in a predictable spot no matter where you invoke it from.
 data_dir = "./data"
-
-# Optional override directory holding ComfyUI workflow templates
-# (`*.json`). When unset, the templates baked into the binary at build
-# time (`workflows/` in the source tree) are used. Set this only to point
-# at an on-disk copy during workflow authoring — `cargo build` re-bakes
-# whatever's in `workflows/` automatically.
-# workflows_dir = "/path/to/zun-flux-pipeline/workflows"
-
-# Explicit workflows exposed to Android. Each must have a matching
-# `<name>.json` in workflows_dir.
-default_workflow = "flux2_klein_edit"
-enabled_workflows = [
-  "flux2_klein_edit",
-]
-
-# Log format: "auto" (pretty on TTY, JSON otherwise), "pretty", or "json".
 log_format = "auto"
+
+# --- PROD (behind same-host reverse proxy, Rocky/RHEL) --------------------
+# token = "<openssl rand -hex 32>"
+# bind = "127.0.0.1:8080"
+# trusted_proxies = ["127.0.0.1", "::1"]
+# comfy_url = "http://127.0.0.1:8188"
+# data_dir = "/var/lib/zun-rust-server"
+# log_format = "json"
+
+
+# === Reference ============================================================
+#
+# token
+#   Secret your Android client sends as `Authorization: Bearer <token>`.
+#   Required, at least 16 chars. Generate with: openssl rand -hex 32.
+#   Without this, anyone hitting the port could control the server.
+#
+# bind
+#   Where the server listens, as "<address>:<port>". Controls *who* can
+#   connect at the network level, not just the port number.
+#     0.0.0.0:8080        any network interface       (DEV — phone on LAN)
+#     127.0.0.1:8080      same machine only           (PROD — behind a proxy)
+#     192.168.1.10:8080   one specific LAN interface
+#     100.64.0.5:8080     one specific tailnet interface
+#
+# trusted_proxies
+#   IPs/CIDRs whose X-Forwarded-For header is trusted as the real client
+#   IP (used for rate-limiting and audit logs). Anyone NOT in this list
+#   has their XFF ignored — it's just a request header any client can set.
+#     []                       no proxy in front       (DEV)
+#     ["127.0.0.1", "::1"]     same-host proxy         (PROD)
+#     ["192.168.1.5"]          one proxy on the LAN
+#     ["100.64.0.0/10"]        any Tailscale node
+#
+# comfy_url
+#   HTTP base for ComfyUI (project-zun's `just serve` default is :8188).
+#   Same value dev and prod when ComfyUI runs on the same machine.
+#
+# data_dir
+#   Where the server stores jobs.db, outputs/, thumbs/, previews/, and
+#   cache/inputs/. Backups = `tar` this directory.
+#   Relative paths resolve against THIS file's directory, NOT your
+#   shell's CWD — the binary behaves the same wherever you run it from.
+#     "./data"                       next to the repo       (DEV)
+#     "/var/lib/zun-rust-server"     FHS, system service    (PROD)
+#
+# log_format
+#   How log lines are printed.
+#     "auto"     pretty in a terminal, JSON when piped  (good default)
+#     "pretty"   always colored text                    (DEV)
+#     "json"     always JSON, plays well with journald  (PROD)
+#
+# Not in this file (and intentionally so):
+#   - No environment variables. The TOML is the only source of truth.
+#   - No XDG / implicit path discovery. You set `data_dir` explicitly.
+#   - No workflow knobs. Workflows are baked into the binary.

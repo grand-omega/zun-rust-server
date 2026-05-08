@@ -15,18 +15,6 @@ pub struct Config {
     pub comfy_url: String,
     #[serde(default = "default_data_dir")]
     pub data_dir: PathBuf,
-    /// Optional override directory holding the ComfyUI workflow templates
-    /// (`*.json`). When unset, the templates baked into the binary at
-    /// build time (`workflows/` in the repo root) are used. Set this only
-    /// to point at an on-disk copy during workflow authoring.
-    #[serde(default)]
-    pub workflows_dir: Option<PathBuf>,
-    /// Workflow selected by default in capability responses.
-    #[serde(default = "default_workflow")]
-    pub default_workflow: String,
-    /// Explicit list of workflow names this server exposes.
-    #[serde(default = "default_enabled_workflows")]
-    pub enabled_workflows: Vec<String>,
     #[serde(default)]
     pub log_format: LogFormat,
     /// IPs / CIDR ranges of reverse proxies whose `X-Forwarded-For` we
@@ -86,12 +74,6 @@ fn default_comfy_url() -> String {
 fn default_data_dir() -> PathBuf {
     PathBuf::from("./data")
 }
-fn default_workflow() -> String {
-    "flux2_klein_edit".into()
-}
-fn default_enabled_workflows() -> Vec<String> {
-    vec!["flux2_klein_edit".into()]
-}
 
 /// Log output format. Defaults to `auto` (pretty when stderr is a TTY, JSON otherwise).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
@@ -125,11 +107,6 @@ impl Config {
         let base = path.parent().unwrap_or_else(|| Path::new("."));
         if config.data_dir.is_relative() {
             config.data_dir = base.join(&config.data_dir);
-        }
-        if let Some(ref dir) = config.workflows_dir
-            && dir.is_relative()
-        {
-            config.workflows_dir = Some(base.join(dir));
         }
         Ok(config)
     }

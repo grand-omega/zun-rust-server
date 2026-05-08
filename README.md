@@ -42,19 +42,23 @@ curl -s localhost:8080/api/v1/health | jq
 
 ## Configuration
 
-All config lives in `config.toml` (gitignored). Copy from `config.example.toml`:
+All config lives in `config.toml` (gitignored). Copy from
+`config.example.toml`, which carries an annotated DEV/PROD profile pair.
+The full reference table lives in that file's `=== Reference ===`
+section; in short:
 
 | Key | Default | Purpose |
 |---|---|---|
 | `token` | — (required) | Bearer token for the Android client |
-| `bind` | `127.0.0.1:8080` | Listen address — server speaks plain HTTP behind a reverse proxy |
-| `trusted_proxies` | `["127.0.0.1", "::1"]` | Peer IPs / CIDRs whose `X-Forwarded-For` is trusted as the real client IP (e.g. `"100.64.0.0/10"` for a tailnet) |
+| `bind` | `127.0.0.1:8080` | Listen address — server speaks plain HTTP |
+| `trusted_proxies` | `["127.0.0.1", "::1"]` | Peer IPs / CIDRs whose `X-Forwarded-For` is honored |
 | `comfy_url` | `http://127.0.0.1:8188` | ComfyUI HTTP base |
 | `data_dir` | `./data` | Houses `jobs.db` and `{cache,outputs,thumbs,previews}/` |
-| `workflows_dir` | unset | Optional override pointing at an on-disk workflow templates dir; unset means use the templates baked into the binary |
-| `default_workflow` | `flux2_klein_edit` | Default workflow advertised to Android |
-| `enabled_workflows` | `flux2_klein_edit` | Explicit workflow names exposed by the server |
 | `log_format` | `auto` | `auto` (pretty on TTY, JSON otherwise), `pretty`, or `json` |
+
+Workflows are baked into the binary at compile time — there is no
+runtime knob to swap them. To pull updated templates from the authoring
+repo run `just sync-workflows` and rebuild.
 
 `RUST_LOG` env var still works for log-level tuning (e.g. `RUST_LOG=debug`).
 
@@ -74,16 +78,18 @@ cargo test
 ```
 
 Workflow templates are vendored at `workflows/` (sibling of `src/`) and
-baked into the binary at compile time via `include_dir!`. To pull updates
-from the authoring repo (`zun-flux-pipeline`):
+baked into the binary at compile time via `include_dir!`. The set
+exposed at runtime is gated by `ENABLED_WORKFLOWS` in
+`src/workflow.rs` — adding a new pipeline is a code change, not a
+config change. To pull updates from the authoring repo
+(`zun-flux-pipeline`):
 
 ```bash
 just sync-workflows                          # default ../zun-flux-pipeline/workflows
 just sync-workflows /path/to/workflows       # explicit override
 ```
 
-Then `cargo build` to rebuild with the new templates. To iterate without
-rebuilding, point `workflows_dir` in `config.toml` at an on-disk copy.
+Then `cargo build` to rebuild with the new templates baked in.
 
 ## Architecture
 

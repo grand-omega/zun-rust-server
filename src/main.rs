@@ -25,20 +25,10 @@ async fn main() -> anyhow::Result<()> {
 
     let pool = db::init(&config.data_dir).await?;
 
-    let workflows = workflow::load_registry(
-        config.workflows_dir.as_deref(),
-        &config.enabled_workflows,
-        &config.default_workflow,
-    )?;
-    let source = config
-        .workflows_dir
-        .as_ref()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|| "<embedded>".into());
+    let workflows = workflow::load_registry()?;
     tracing::info!(
         n = workflows.templates.len(),
         supported = workflows.supported_count(),
-        source = %source,
         "workflow templates loaded"
     );
 

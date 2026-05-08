@@ -2,20 +2,28 @@
 //!
 //! Templates are opaque JSON blobs authored in the sibling
 //! `zun-flux-pipeline` repo (see its `doc/WORKFLOWS.md` for the full
-//! placeholder contract) and vendored into `workflows/` at the repo root.
-//! `include_dir!` bakes them into the binary so a `cargo install`'d build
-//! is self-contained; an on-disk `workflows_dir` config knob is honored as
-//! a dev override. This module performs **whole-string** substitution on
-//! known placeholder tokens — substring matches are intentional
-//! non-matches: `PROMPT_PLACEHOLDER` must occupy an entire JSON string
-//! value.
-use std::{collections::HashMap, path::Path};
+//! placeholder contract) and vendored into `workflows/` at the repo
+//! root. `include_dir!` bakes them into the binary so the deployed
+//! binary is self-contained — there is no runtime knob to swap them.
+//! This module performs **whole-string** substitution on known
+//! placeholder tokens — substring matches are intentional non-matches:
+//! `PROMPT_PLACEHOLDER` must occupy an entire JSON string value.
+use std::collections::HashMap;
 
 use include_dir::{Dir, include_dir};
 use serde::Serialize;
 use serde_json::Value;
 
 static EMBEDDED_WORKFLOWS: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/workflows");
+
+/// Workflow exposed by capabilities and accepted by `POST /jobs`. The
+/// `workflows/` dir may contain more files (a library for future
+/// pipelines); this list gates what's actually wired up. Updating
+/// requires a code change + recompile, on purpose.
+pub const ENABLED_WORKFLOWS: &[&str] = &["flux2_klein_edit"];
+
+/// The workflow advertised as `default: true` in `/capabilities`.
+pub const DEFAULT_WORKFLOW: &str = "flux2_klein_edit";
 
 // --- Placeholder tokens (mirrors project-zun/doc/WORKFLOWS.md). -----------
 
@@ -170,24 +178,18 @@ pub fn build_edit_workflow(
     out
 }
 
-/// Load enabled workflows. When `dir_override` is `Some`, templates are
-/// read from that directory (dev override); otherwise they come from the
-/// `include_dir!`-baked set vendored at `workflows/`.
-pub fn load_registry(
-    dir_override: Option<&Path>,
-    enabled_workflows: &[String],
-    default_workflow: &str,
-) -> anyhow::Result<WorkflowRegistry> {
+/// Load the embedded workflow templates listed in [`ENABLED_WORKFLOWS`].
+pub fn load_registry() -> anyhow::Result<WorkflowRegistry> {
     let mut templates = HashMap::new();
     let mut support = HashMap::new();
 
-    for name in enabled_workflows {
-        let template = match dir_override {
-            Some(d) => load_template(d, name)?,
-            None => load_embedded_template(name)?,
-        };
-        templates.insert(name.clone(), template);
-        support.insert(name.clone(), workflow_support(name, default_workflow));
+    for name in ENABLED_WORKFLOWS {
+        let template = load_embedded_template(name)?;
+        templates.insert((*name).to_string(), template);
+        support.insert(
+            (*name).to_string(),
+            workflow_support(name, DEFAULT_WORKFLOW),
+        );
     }
 
     Ok(WorkflowRegistry { templates, support })
@@ -336,17 +338,10 @@ pub fn patch_seed_placeholder(value: &mut Value, seed: i64) {
     walk(value, seed);
 }
 
-/// Load a single explicitly-enabled workflow JSON by name from disk.
-pub fn load_template(dir: &Path, name: &str) -> anyhow::Result<Value> {
-    validate_name(name)?;
-    let path = dir.join(format!("{name}.json"));
-    let raw = std::fs::read_to_string(&path)
-        .map_err(|e| anyhow::anyhow!("read {}: {e}", path.display()))?;
-    serde_json::from_str(&raw).map_err(|e| anyhow::anyhow!("parse {}: {e}", path.display()))
-}
-
 fn load_embedded_template(name: &str) -> anyhow::Result<Value> {
-    validate_name(name)?;
+    if name.is_empty() || name.contains('/') || name.contains('\\') || name.contains("..") {
+        anyhow::bail!("invalid workflow name: {name:?}");
+    }
     let filename = format!("{name}.json");
     let file = EMBEDDED_WORKFLOWS
         .get_file(&filename)
@@ -355,13 +350,6 @@ fn load_embedded_template(name: &str) -> anyhow::Result<Value> {
         .contents_utf8()
         .ok_or_else(|| anyhow::anyhow!("embedded {filename} is not valid UTF-8"))?;
     serde_json::from_str(raw).map_err(|e| anyhow::anyhow!("parse embedded {filename}: {e}"))
-}
-
-fn validate_name(name: &str) -> anyhow::Result<()> {
-    if name.is_empty() || name.contains('/') || name.contains('\\') || name.contains("..") {
-        anyhow::bail!("invalid workflow name: {name:?}");
-    }
-    Ok(())
 }
 
 // --- tests --------------------------------------------------------------
