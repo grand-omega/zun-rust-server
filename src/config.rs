@@ -101,6 +101,11 @@ impl Config {
         })?;
         let mut config: Self = toml::from_str(&text)
             .map_err(|e| anyhow::anyhow!("invalid {}: {}", path.display(), e))?;
+        if config.token == "REPLACE_ME_RUN_JUST_SETUP" {
+            anyhow::bail!(
+                "token is still the example placeholder; run `just setup` to generate a real one"
+            );
+        }
         if config.token.len() < 16 {
             anyhow::bail!("token must be at least 16 characters");
         }

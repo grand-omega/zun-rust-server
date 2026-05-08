@@ -11,7 +11,7 @@
 # Relative paths (data_dir) resolve against THIS file's directory.
 
 # --- DEV (phone on LAN, no proxy) -----------------------------------------
-token = "1111111111111111111111111111111111111111111111111111111111111111"
+token = "REPLACE_ME_RUN_JUST_SETUP"
 bind = "0.0.0.0:8080"
 trusted_proxies = []
 comfy_url = "http://127.0.0.1:8188"
