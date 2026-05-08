@@ -49,7 +49,6 @@ async fn main() -> anyhow::Result<()> {
         worker_tx,
         auth_limiter: AuthLimiter::new(),
         disk_usage_cache: Arc::new(parking_lot::Mutex::new(None)),
-        running_diffusers_cancel: Arc::new(parking_lot::Mutex::new(None)),
     };
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);

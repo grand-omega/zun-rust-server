@@ -151,25 +151,6 @@ async fn capabilities_reports_enabled_workflows() {
     assert_eq!(supported["supported"], true);
     assert_eq!(supported["display_name"], "FLUX 2 klein");
     assert_eq!(supported["default"], true);
-    let heavy = workflows
-        .iter()
-        .find(|w| w["name"] == "flux2_klein_9b_kv_experimental")
-        .unwrap();
-    assert_eq!(heavy["supported"], true);
-    assert_eq!(heavy["display_name"], "FLUX 2 klein 9B-KV Experimental");
-    assert_eq!(heavy["kind"], "image_edit");
-    assert_eq!(heavy["requires_input_image"], true);
-    assert_eq!(heavy["experimental"], true);
-    assert_eq!(heavy["default"], false);
-    assert_eq!(heavy["runtime"], "diffusers");
-    assert_eq!(heavy["pipeline"], "Flux2KleinKVPipeline");
-    assert_eq!(heavy["model_path"], "/home/doremy/ml/t2i/flux2-klein-9b-kv");
-    assert_eq!(heavy["dtype"], "bfloat16");
-    assert_eq!(heavy["offload_mode"], "sequential");
-    assert_eq!(heavy["default_steps"], 4);
-    assert_eq!(heavy["default_width"], 768);
-    assert_eq!(heavy["default_height"], 1024);
-    assert!(heavy["warning"].as_str().unwrap().contains("16 GB VRAM"));
     assert!(
         workflows.iter().all(|w| w["name"] != "flux_fill_auto_mask"),
         "capabilities should only expose enabled workflows"

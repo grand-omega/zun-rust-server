@@ -25,11 +25,6 @@ pub struct Config {
     /// Explicit list of workflow names this server exposes.
     #[serde(default = "default_enabled_workflows")]
     pub enabled_workflows: Vec<String>,
-    /// On-disk path to the FLUX2 9B-KV weights, recorded in audit logs and
-    /// the per-job sidecar metadata. Required when the experimental
-    /// virtual workflow is used; otherwise ignored.
-    #[serde(default)]
-    pub diffusers_model_path: Option<PathBuf>,
     #[serde(default)]
     pub log_format: LogFormat,
     /// IPs / CIDR ranges of reverse proxies whose `X-Forwarded-For` we

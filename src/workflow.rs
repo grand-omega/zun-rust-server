@@ -29,8 +29,6 @@ pub const MASK_PROMPT: &str = "MASK_PROMPT_PLACEHOLDER";
 #[allow(dead_code)]
 pub const LORA: &str = "LORA_PLACEHOLDER";
 
-pub const FLUX2_KLEIN_9B_KV_EXPERIMENTAL: &str = "flux2_klein_9b_kv_experimental";
-
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct WorkflowSupport {
     pub name: String,
@@ -64,24 +62,16 @@ impl WorkflowRegistry {
     pub fn empty() -> Self {
         Self {
             templates: HashMap::new(),
-            support: HashMap::from([(
-                FLUX2_KLEIN_9B_KV_EXPERIMENTAL.to_string(),
-                flux2_klein_9b_kv_experimental_support("flux2_klein_edit"),
-            )]),
+            support: HashMap::new(),
         }
     }
 
     pub fn supported_template(&self, name: &str) -> Result<&Value, WorkflowSupportError> {
         match self.support.get(name) {
-            Some(s) if s.supported && s.runtime == "comfyui" => self
+            Some(s) if s.supported => self
                 .templates
                 .get(name)
                 .ok_or_else(|| WorkflowSupportError::Unknown(name.to_string())),
-            Some(s) if s.supported && s.runtime == "diffusers" => {
-                Err(WorkflowSupportError::Virtual {
-                    name: name.to_string(),
-                })
-            }
             Some(s) => Err(WorkflowSupportError::Unsupported {
                 name: name.to_string(),
                 reason: s.reason.clone().unwrap_or_else(|| "unsupported".into()),
@@ -118,8 +108,6 @@ pub enum WorkflowSupportError {
     Unknown(String),
     #[error("workflow '{name}' is not supported by this server: {reason}")]
     Unsupported { name: String, reason: String },
-    #[error("workflow '{name}' is not a ComfyUI template")]
-    Virtual { name: String },
 }
 
 /// Recursively walk the JSON value; whenever we find a string that is
@@ -184,14 +172,6 @@ pub fn load_registry(
     let mut support = HashMap::new();
 
     for name in enabled_workflows {
-        if is_virtual_supported_workflow(name) {
-            support.insert(
-                name.clone(),
-                flux2_klein_9b_kv_experimental_support(default_workflow),
-            );
-            continue;
-        }
-
         let template = load_template(dir, name)?;
         templates.insert(name.clone(), template);
         support.insert(name.clone(), workflow_support(name, default_workflow));
@@ -204,15 +184,10 @@ pub fn support_for_templates(
     templates: &HashMap<String, Value>,
     default_workflow: &str,
 ) -> HashMap<String, WorkflowSupport> {
-    let mut support: HashMap<String, WorkflowSupport> = templates
+    templates
         .keys()
         .map(|name| (name.clone(), workflow_support(name, default_workflow)))
-        .collect();
-    support.insert(
-        FLUX2_KLEIN_9B_KV_EXPERIMENTAL.to_string(),
-        flux2_klein_9b_kv_experimental_support(default_workflow),
-    );
-    support
+        .collect()
 }
 
 struct WorkflowMetadata {
@@ -281,10 +256,6 @@ fn workflow_metadata(name: &str) -> WorkflowMetadata {
     }
 }
 
-pub fn is_virtual_supported_workflow(name: &str) -> bool {
-    name == FLUX2_KLEIN_9B_KV_EXPERIMENTAL
-}
-
 fn workflow_support(name: &str, default_workflow: &str) -> WorkflowSupport {
     let metadata = workflow_metadata(name);
     WorkflowSupport {
@@ -311,38 +282,6 @@ fn workflow_support(name: &str, default_workflow: &str) -> WorkflowSupport {
             SEED.to_string(),
         ],
         warning: metadata.warning.map(str::to_string),
-        reason: None,
-    }
-}
-
-fn flux2_klein_9b_kv_experimental_support(default_workflow: &str) -> WorkflowSupport {
-    WorkflowSupport {
-        name: FLUX2_KLEIN_9B_KV_EXPERIMENTAL.to_string(),
-        display_name: "FLUX 2 klein 9B-KV Experimental".to_string(),
-        kind: "image_edit".to_string(),
-        requires_input_image: true,
-        experimental: true,
-        default: default_workflow == FLUX2_KLEIN_9B_KV_EXPERIMENTAL,
-        runtime: "diffusers".to_string(),
-        pipeline: Some("Flux2KleinKVPipeline".to_string()),
-        model_path: Some("/home/doremy/ml/t2i/flux2-klein-9b-kv".to_string()),
-        dtype: Some("bfloat16".to_string()),
-        offload_mode: Some("sequential".to_string()),
-        default_steps: Some(4),
-        default_width: Some(768),
-        default_height: Some(1024),
-        loaded: true,
-        supported: true,
-        placeholders: vec![
-            PROMPT.to_string(),
-            INPUT_IMAGE.to_string(),
-            FILENAME_PREFIX.to_string(),
-            SEED.to_string(),
-        ],
-        warning: Some(
-            "Experimental Diffusers workflow; slower/heavier and opt-in. May OOM on 16 GB VRAM."
-                .to_string(),
-        ),
         reason: None,
     }
 }
@@ -508,36 +447,6 @@ mod tests {
         assert!(!wf.experimental);
         assert!(wf.default);
         assert_eq!(wf.warning, None);
-    }
-
-    #[test]
-    fn support_list_includes_virtual_diffusers_9b_kv() {
-        let registry = WorkflowRegistry {
-            templates: HashMap::new(),
-            support: HashMap::from([(
-                FLUX2_KLEIN_9B_KV_EXPERIMENTAL.to_string(),
-                flux2_klein_9b_kv_experimental_support("flux2_klein_edit"),
-            )]),
-        };
-        assert!(registry.supports(FLUX2_KLEIN_9B_KV_EXPERIMENTAL).is_ok());
-        assert_eq!(registry.supported_count(), 1);
-        let wf = registry
-            .support_list()
-            .into_iter()
-            .find(|wf| wf.name == FLUX2_KLEIN_9B_KV_EXPERIMENTAL)
-            .unwrap();
-        assert_eq!(wf.display_name, "FLUX 2 klein 9B-KV Experimental");
-        assert_eq!(wf.runtime, "diffusers");
-        assert_eq!(wf.pipeline.as_deref(), Some("Flux2KleinKVPipeline"));
-        assert_eq!(
-            wf.model_path.as_deref(),
-            Some("/home/doremy/ml/t2i/flux2-klein-9b-kv")
-        );
-        assert_eq!(wf.dtype.as_deref(), Some("bfloat16"));
-        assert_eq!(wf.offload_mode.as_deref(), Some("sequential"));
-        assert_eq!(wf.default_steps, Some(4));
-        assert_eq!(wf.default_width, Some(768));
-        assert_eq!(wf.default_height, Some(1024));
     }
 
     #[test]
