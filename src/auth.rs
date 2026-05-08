@@ -11,6 +11,7 @@ use axum::{
     middleware::Next,
     response::Response,
 };
+use ipnet::IpNet;
 use parking_lot::Mutex;
 use subtle::ConstantTimeEq;
 
@@ -104,13 +105,13 @@ fn token_eq(a: &str, b: &str) -> bool {
 ///
 /// XFF from an untrusted peer is ignored — it's just a request header
 /// any client can set.
-fn peer_ip(req: &Request, trusted_proxies: &[IpAddr]) -> Option<IpAddr> {
+fn peer_ip(req: &Request, trusted_proxies: &[IpNet]) -> Option<IpAddr> {
     let direct = req
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
         .map(|c| c.0.ip())?;
 
-    if trusted_proxies.contains(&direct)
+    if trusted_proxies.iter().any(|net| net.contains(&direct))
         && let Some(forwarded) = req
             .headers()
             .get(&X_FORWARDED_FOR)
@@ -181,12 +182,13 @@ pub async fn require_bearer(
 
 fn record_failure(state: &AppState, ip: Option<IpAddr>, path: &str, reason: &'static str) {
     let failures = ip.map(|ip| state.auth_limiter.record_failure(ip));
+    let ip_str = ip.map(|i| i.to_string());
     tracing::warn!(
         target: "audit",
         event = "auth.denied",
         reason,
         path = %path,
-        ip = ?ip,
+        ip = ip_str.as_deref().unwrap_or("unknown"),
         failures = ?failures,
     );
 }
@@ -301,10 +303,14 @@ mod tests {
         assert_eq!(first_forwarded_ip(""), None);
     }
 
+    fn nets(specs: &[&str]) -> Vec<IpNet> {
+        specs.iter().map(|s| s.parse().unwrap()).collect()
+    }
+
     #[test]
     fn peer_ip_returns_direct_when_trusted_list_is_empty() {
         // Empty trusted_proxies = "no proxy in front." XFF must be ignored.
-        let trusted: Vec<IpAddr> = vec![];
+        let trusted: Vec<IpNet> = vec![];
         let req = req_with(IpAddr::V4(Ipv4Addr::LOCALHOST), Some("203.0.113.10"));
         assert_eq!(
             peer_ip(&req, &trusted),
@@ -314,7 +320,7 @@ mod tests {
 
     #[test]
     fn peer_ip_trusts_xff_only_when_peer_is_in_list() {
-        let trusted = vec![IpAddr::V4(Ipv4Addr::LOCALHOST)];
+        let trusted = nets(&["127.0.0.1/32"]);
         let req = req_with(IpAddr::V4(Ipv4Addr::LOCALHOST), Some("203.0.113.10"));
         assert_eq!(
             peer_ip(&req, &trusted),
@@ -337,7 +343,7 @@ mod tests {
         // Topology: Caddy on a LAN box (192.168.1.5) reverse-proxies to this
         // server bound on 192.168.1.10. trusted_proxies tells us the proxy.
         let proxy = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 5));
-        let trusted = vec![proxy];
+        let trusted = nets(&["192.168.1.5/32"]);
         let req = req_with(proxy, Some("203.0.113.10"));
         assert_eq!(
             peer_ip(&req, &trusted),
@@ -347,7 +353,7 @@ mod tests {
 
     #[test]
     fn peer_ip_falls_back_to_peer_when_xff_missing() {
-        let trusted = vec![IpAddr::V4(Ipv4Addr::LOCALHOST)];
+        let trusted = nets(&["127.0.0.1/32"]);
         let req = req_with(IpAddr::V4(Ipv4Addr::LOCALHOST), None);
         assert_eq!(
             peer_ip(&req, &trusted),
@@ -357,11 +363,38 @@ mod tests {
 
     #[test]
     fn peer_ip_handles_ipv6_loopback_proxy() {
-        let trusted = vec![IpAddr::V6(Ipv6Addr::LOCALHOST)];
+        let trusted = nets(&["::1/128"]);
         let req = req_with(IpAddr::V6(Ipv6Addr::LOCALHOST), Some("2001:db8::1"));
         assert_eq!(
             peer_ip(&req, &trusted),
             Some(IpAddr::V6("2001:db8::1".parse().unwrap())),
         );
+    }
+
+    #[test]
+    fn peer_ip_matches_proxy_inside_cidr_range() {
+        // Tailnet topology: trust any proxy in 100.64.0.0/10 (CGNAT range
+        // Tailscale uses). Two different proxy IPs in that range should
+        // both be honored without enumerating each one.
+        let trusted = nets(&["100.64.0.0/10"]);
+
+        let proxy_a = IpAddr::V4(Ipv4Addr::new(100, 64, 0, 5));
+        let req = req_with(proxy_a, Some("203.0.113.10"));
+        assert_eq!(
+            peer_ip(&req, &trusted),
+            Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10))),
+        );
+
+        let proxy_b = IpAddr::V4(Ipv4Addr::new(100, 100, 200, 99));
+        let req = req_with(proxy_b, Some("203.0.113.10"));
+        assert_eq!(
+            peer_ip(&req, &trusted),
+            Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10))),
+        );
+
+        // Outside the CIDR — XFF ignored.
+        let outside = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 5));
+        let req = req_with(outside, Some("203.0.113.10"));
+        assert_eq!(peer_ip(&req, &trusted), Some(outside));
     }
 }

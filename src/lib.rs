@@ -98,6 +98,12 @@ pub fn router(state: AppState) -> Router {
         ))
         .with_state(state.clone());
 
+    // Health is intentionally unauthenticated so external probes
+    // (the reverse proxy's upstream check, monitoring, the Android client
+    // before it has a token) can verify reachability without a token.
+    // It exposes only liveness + ComfyUI reachability, no per-job data.
+    // If you want to gate it externally, do that in the proxy
+    // (e.g. Caddy `@allowed remote_ip 100.64.0.0/10`).
     let app = Router::new()
         .route("/api/v1/health", get(health))
         .with_state(state)
@@ -108,6 +114,11 @@ pub fn router(state: AppState) -> Router {
     // by Timeout (which short-circuits inner layers) still get x-request-id
     // copied onto them — log correlation matters most exactly when a
     // request times out.
+    //
+    // SetRequestIdLayer only inserts x-request-id when the request doesn't
+    // already carry one, so an upstream X-Request-Id forwarded by the
+    // reverse proxy (e.g. Caddy `header_up X-Request-Id {http.request.uuid}`)
+    // is preserved end-to-end; if the proxy sends nothing, we mint a UUID.
     app.layer(
         ServiceBuilder::new()
             .layer(SetSensitiveRequestHeadersLayer::new(std::iter::once(

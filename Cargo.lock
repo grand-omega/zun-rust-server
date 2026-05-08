@@ -1125,6 +1125,9 @@ name = "ipnet"
 version = "2.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d98f6fed1fde3f8c21bc40a1abb88dd75e67924f9cffc3ef95607bad8017f8e2"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "iri-string"
@@ -3695,7 +3698,7 @@ checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
 
 [[package]]
 name = "zun-rust-server"
-version = "0.3.0"
+version = "0.4.0-dev"
 dependencies = [
  "anyhow",
  "axum",
@@ -3704,6 +3707,7 @@ dependencies = [
  "futures-util",
  "http-body-util",
  "image",
+ "ipnet",
  "parking_lot",
  "rand 0.10.1",
  "reqwest",

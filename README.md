@@ -6,7 +6,7 @@ Single-user, self-hosted. Plain HTTP backend designed to live behind a reverse p
 
 ## Status
 
-**v0.3.0** — API-complete, end-to-end verified against real FLUX2 klein (~7 s per job on RTX 4070 Ti Super).
+**v0.4.0-dev** (caddy-proxy branch) — building on v0.3.0; commits to plain HTTP behind a reverse proxy and adds `trusted_proxies` (CIDR-aware) for correct per-client throttling and audit-log attribution. v0.3.0 was API-complete, end-to-end verified against FLUX2 klein (~7 s per job on RTX 4070 Ti Super).
 
 ## Quick start
 
@@ -34,7 +34,7 @@ All config lives in `config.toml` (gitignored). Copy from `config.example.toml`:
 |---|---|---|
 | `token` | — (required) | Bearer token for the Android client |
 | `bind` | `127.0.0.1:8080` | Listen address — server speaks plain HTTP behind a reverse proxy |
-| `trusted_proxies` | `["127.0.0.1", "::1"]` | Peer IPs whose `X-Forwarded-For` is trusted as the real client IP |
+| `trusted_proxies` | `["127.0.0.1", "::1"]` | Peer IPs / CIDRs whose `X-Forwarded-For` is trusted as the real client IP (e.g. `"100.64.0.0/10"` for a tailnet) |
 | `comfy_url` | `http://127.0.0.1:8188` | ComfyUI HTTP base |
 | `data_dir` | `./data` | Houses `jobs.db`, `{cache,outputs,thumbs,previews}/`, and the `workflows/` symlink |
 | `default_workflow` | `flux2_klein_edit` | Default workflow advertised to Android |

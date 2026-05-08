@@ -6,19 +6,27 @@
 #   openssl rand -hex 32
 token = "1111111111111111"
 
-# Address the server listens on. The server speaks plain HTTP and is
-# expected to sit behind a reverse proxy that terminates TLS.
-# 127.0.0.1:8080      — default; proxy on the same host
-# <lan-or-tailnet-ip> — proxy on a different host (firewall must restrict)
-# 0.0.0.0:8080        — debug-only direct exposure (no TLS!)
+# Address the server listens on. The server speaks plain HTTP behind a
+# reverse proxy that terminates TLS — same-host proxy is the default and
+# recommended setup. 127.0.0.1:8080 means only the local proxy can reach
+# the backend; nothing else on the network can.
+#
+# Other shapes (uncommon):
+#   <lan-ip>:8080       proxy on a different host on the same LAN
+#   <tailnet-ip>:8080   proxy on a different node in the same tailnet
+#   0.0.0.0:8080        debug only — direct exposure with NO TLS
 bind = "127.0.0.1:8080"
 
-# IPs of reverse proxies whose `X-Forwarded-For` header is trusted as the
-# real client IP for auth-failure rate limiting and audit logs. XFF from
-# any peer NOT in this list is ignored — it's just a request header any
+# Reverse proxies whose `X-Forwarded-For` header is trusted as the real
+# client IP for auth-failure rate limiting and audit logs. XFF from any
+# peer NOT in this list is ignored — it's just a request header any
 # client can set, so trust must be gated by the TCP peer.
-# Default covers a same-host proxy. If your proxy lives on a different
-# host, list its IP here, e.g. ["192.168.1.5"].
+#
+# Each entry is a plain IP (implicit /32 or /128) or a CIDR range. The
+# default covers a same-host proxy. Examples:
+#   "192.168.1.5"        single proxy on the same LAN
+#   "100.64.0.0/10"      any peer in the Tailscale CGNAT range
+#   "172.16.0.0/12"      any peer on a Docker bridge network
 trusted_proxies = ["127.0.0.1", "::1"]
 
 # ComfyUI HTTP endpoint (project-zun's `just serve` default).

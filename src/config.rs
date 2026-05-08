@@ -3,7 +3,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use serde::Deserialize;
+use ipnet::{IpNet, Ipv4Net, Ipv6Net};
+use serde::{Deserialize, Deserializer};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
@@ -31,23 +32,56 @@ pub struct Config {
     pub diffusers_model_path: Option<PathBuf>,
     #[serde(default)]
     pub log_format: LogFormat,
-    /// IPs of reverse proxies whose `X-Forwarded-For` we trust. The peer IP
-    /// of an incoming connection is checked against this list; if it
-    /// matches, the leftmost XFF hop is used as the real client IP for
-    /// auth-failure rate limiting and audit logs. Empty list means
-    /// "no proxy in front" — the raw TCP peer is always used.
-    #[serde(default = "default_trusted_proxies")]
-    pub trusted_proxies: Vec<IpAddr>,
+    /// IPs / CIDR ranges of reverse proxies whose `X-Forwarded-For` we
+    /// trust. The peer IP of an incoming connection is checked against
+    /// this list; if any entry contains it, the leftmost XFF hop is used
+    /// as the real client IP for auth-failure rate limiting and audit
+    /// logs. Empty list means "no proxy in front" — the raw TCP peer is
+    /// always used.
+    ///
+    /// Each entry is a string parsed as either a plain IP (`"127.0.0.1"`,
+    /// implicitly /32 or /128) or CIDR (`"100.64.0.0/10"` for a tailnet,
+    /// `"172.16.0.0/12"` for a Docker bridge). Mixing both forms is fine.
+    #[serde(
+        default = "default_trusted_proxies",
+        deserialize_with = "deserialize_trusted_proxies"
+    )]
+    pub trusted_proxies: Vec<IpNet>,
 }
 
 fn default_bind() -> String {
     "127.0.0.1:8080".into()
 }
-fn default_trusted_proxies() -> Vec<IpAddr> {
+fn default_trusted_proxies() -> Vec<IpNet> {
     vec![
-        IpAddr::V4(Ipv4Addr::LOCALHOST),
-        IpAddr::V6(Ipv6Addr::LOCALHOST),
+        IpNet::V4(Ipv4Net::from(Ipv4Addr::LOCALHOST)),
+        IpNet::V6(Ipv6Net::from(Ipv6Addr::LOCALHOST)),
     ]
+}
+
+/// Accepts both `"127.0.0.1"` (bare IP, treated as /32 or /128) and
+/// `"100.64.0.0/10"` (CIDR). The bare-IP form keeps the simple case
+/// readable in `config.toml`; the CIDR form covers tailnets, Docker
+/// bridges, and other ranges where the proxy IP is dynamic.
+fn deserialize_trusted_proxies<'de, D>(deserializer: D) -> Result<Vec<IpNet>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw: Vec<String> = Vec::deserialize(deserializer)?;
+    raw.into_iter()
+        .map(|s| {
+            s.parse::<IpNet>()
+                .or_else(|_| s.parse::<IpAddr>().map(ip_to_net))
+                .map_err(serde::de::Error::custom)
+        })
+        .collect()
+}
+
+fn ip_to_net(ip: IpAddr) -> IpNet {
+    match ip {
+        IpAddr::V4(v) => IpNet::V4(Ipv4Net::from(v)),
+        IpAddr::V6(v) => IpNet::V6(Ipv6Net::from(v)),
+    }
 }
 fn default_comfy_url() -> String {
     "http://127.0.0.1:8188".into()
