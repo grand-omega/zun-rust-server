@@ -2,44 +2,62 @@
 
 A personal Rust server wrapping [project-zun](https://github.com/grand-omega/project-zun)'s ComfyUI + FLUX2 setup for a single-user Android client. Handles job orchestration, persistence, and an HTTP API the app drives.
 
-Single-user, self-hosted. Runs on home LAN or Tailscale — no special network setup required.
+Single-user, self-hosted. Plain HTTP backend designed to live behind a reverse proxy (Caddy, nginx, Tailscale Serve, etc.) that terminates TLS.
 
 ## Status
 
-**v0.3.0** — API-complete, end-to-end verified against real FLUX2 klein (~7 s per job on RTX 4070 Ti Super).
+**v0.4.0-dev** — building on v0.3.0; commits to plain HTTP behind a reverse proxy and trims multi-tenant scaffolding (per-IP rate limiter, proactive health probe, request-ID propagation) that doesn't earn its keep on a single-user box. v0.3.0 was API-complete, end-to-end verified against FLUX2 klein (~7 s per job on RTX 4070 Ti Super).
 
 ## Quick start
 
 Prerequisites:
 - Rust stable via [`rustup`](https://rustup.rs/)
-- ComfyUI running from `project-zun` (`just serve` there)
+- ComfyUI running from `zun-flux-pipeline` (`just serve` there)
+
+Dev (from the repo root, finds `./config.toml`):
 
 ```bash
 cp config.example.toml config.toml   # then edit: set token, bind address
 cargo run                            # creates data/jobs.db with the v2 schema
-cargo run --bin zun-admin -- seed-prompts --from starter_prompts.toml
 ```
+
+Installed (binary anywhere, config anywhere):
+
+```bash
+cargo install --path .
+zun-rust-server --config /etc/zun/config.toml
+```
+
+Relative paths in `config.toml` (`data_dir`) are resolved against the
+config file's parent directory, not the current working directory — a
+`cargo install`'d binary works the same regardless of where you run it
+from.
 
 Hit `/api/v1/health` to verify:
 
 ```bash
 curl -s localhost:8080/api/v1/health | jq
-# { "status": "ok", "version": "0.1.0", "comfy": { "ok": true, ... } }
+# { "status": "ok", "version": "0.4.0-dev", "disk": { "data_bytes": 0 } }
 ```
 
 ## Configuration
 
-All config lives in `config.toml` (gitignored). Copy from `config.example.toml`:
+All config lives in `config.toml` (gitignored). Copy from
+`config.example.toml`, which carries an annotated DEV/PROD profile pair.
+The full reference table lives in that file's `=== Reference ===`
+section; in short:
 
 | Key | Default | Purpose |
 |---|---|---|
 | `token` | — (required) | Bearer token for the Android client |
-| `bind` | `0.0.0.0:8080` | Listen address — works on LAN and Tailscale simultaneously |
+| `bind` | `127.0.0.1:8080` | Listen address — server speaks plain HTTP |
 | `comfy_url` | `http://127.0.0.1:8188` | ComfyUI HTTP base |
-| `data_dir` | `./data` | Houses `jobs.db`, `{cache,outputs,thumbs,previews}/`, and the `workflows/` symlink |
-| `default_workflow` | `flux2_klein_edit` | Default workflow advertised to Android |
-| `enabled_workflows` | `flux2_klein_edit`, `flux2_klein_9b_kv_experimental` | Explicit workflow names exposed by the server |
+| `data_dir` | `./data` | Houses `jobs.db` and `{cache,outputs,thumbs,previews}/` |
 | `log_format` | `auto` | `auto` (pretty on TTY, JSON otherwise), `pretty`, or `json` |
+
+Workflows are baked into the binary at compile time — there is no
+runtime knob to swap them. To update templates, edit the files under
+`workflows/` and rebuild.
 
 `RUST_LOG` env var still works for log-level tuning (e.g. `RUST_LOG=debug`).
 
@@ -58,11 +76,12 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-Workflow templates live in project-zun and are consumed via a symlink:
-
-```bash
-ln -s ../../project-zun/workflows data/workflows
-```
+Workflow templates are vendored at `workflows/` (sibling of `src/`) and
+baked into the binary at compile time via `include_dir!`. The set
+exposed at runtime is gated by `ENABLED_WORKFLOWS` in
+`src/workflow.rs` — adding a new pipeline is a code change, not a
+config change. To update, edit the files under `workflows/` (or copy
+new ones in from the authoring repo) and `cargo build`.
 
 ## Architecture
 
@@ -70,12 +89,11 @@ ln -s ../../project-zun/workflows data/workflows
 - **sqlx + SQLite** (WAL) for the job queue — no external DB
 - **reqwest (rustls)** to ComfyUI — pure Rust, no OpenSSL
 - Background **worker** drains the queue one job at a time; per-prompt timeout; crash recovery on restart
-- Background **health monitor** probes ComfyUI every 30 s; state exposed on `/api/health`
-- **tracing + tower-http** for request-ID spans, structured logs, header redaction
+- **tracing + tower-http** for structured logs and header redaction
 
 ## Security
 
-Network boundary is the primary auth layer. On Tailscale, only enrolled devices can reach the server. On home LAN, only devices on the local network. A bearer token (`config.toml: token`) provides a second layer.
+The server speaks plain HTTP and assumes a reverse proxy in front terminates TLS and gates network access (firewall, overlay-network membership, Caddy `@allowed` matchers, whatever fits your topology). The bearer token (`config.toml: token`) is the application-layer second factor. There is no in-server rate limiting; if you need brute-force protection on the token, add it at the proxy.
 
 ## Roadmap
 

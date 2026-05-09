@@ -8,10 +8,7 @@ use axum::Router;
 use sqlx::SqlitePool;
 use tempfile::TempDir;
 use tokio::sync::{mpsc, watch};
-use zun_rust_server::{
-    AppState, Config, auth::AuthLimiter, comfy::ComfyClient, comfy_monitor, db, hash, router,
-    worker, workflow,
-};
+use zun_rust_server::{AppState, Config, comfy::ComfyClient, db, hash, router, worker, workflow};
 
 pub const TEST_TOKEN: &str = "test-token-0123456789abcdef";
 
@@ -37,13 +34,6 @@ pub async fn test_app_with_comfy_and_ws(comfy_url: &str, ws_url: &str) -> TestAp
 
     let config = Config {
         data_dir: tempdir.path().to_path_buf(),
-        workflows_dir: None,
-        default_workflow: "flux2_klein_edit".into(),
-        enabled_workflows: vec![
-            "flux2_klein_edit".into(),
-            "flux2_klein_9b_kv_experimental".into(),
-        ],
-        diffusers_model_path: None,
         bind: "127.0.0.1:0".into(),
         token: TEST_TOKEN.to_string(),
         comfy_url: comfy_url.to_string(),
@@ -57,11 +47,8 @@ pub async fn test_app_with_comfy_and_ws(comfy_url: &str, ws_url: &str) -> TestAp
         config,
         workflows: Arc::new(workflow::WorkflowRegistry::empty()),
         comfy,
-        comfy_health: comfy_monitor::new_handle(),
         worker_tx,
-        auth_limiter: AuthLimiter::new(),
         disk_usage_cache: Arc::new(parking_lot::Mutex::new(None)),
-        running_diffusers_cancel: Arc::new(parking_lot::Mutex::new(None)),
     };
     TestApp {
         router: router(state.clone()),

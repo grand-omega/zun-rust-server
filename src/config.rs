@@ -11,42 +11,18 @@ pub struct Config {
     pub comfy_url: String,
     #[serde(default = "default_data_dir")]
     pub data_dir: PathBuf,
-    /// Directory holding the ComfyUI workflow templates (`*.json`).
-    /// Defaults to `<data_dir>/workflows` when unset.
-    #[serde(default)]
-    pub workflows_dir: Option<PathBuf>,
-    /// Workflow selected by default in capability responses.
-    #[serde(default = "default_workflow")]
-    pub default_workflow: String,
-    /// Explicit list of workflow names this server exposes.
-    #[serde(default = "default_enabled_workflows")]
-    pub enabled_workflows: Vec<String>,
-    /// On-disk path to the FLUX2 9B-KV weights, recorded in audit logs and
-    /// the per-job sidecar metadata. Required when the experimental
-    /// virtual workflow is used; otherwise ignored.
-    #[serde(default)]
-    pub diffusers_model_path: Option<PathBuf>,
     #[serde(default)]
     pub log_format: LogFormat,
 }
 
 fn default_bind() -> String {
-    "0.0.0.0:8080".into()
+    "127.0.0.1:8080".into()
 }
 fn default_comfy_url() -> String {
     "http://127.0.0.1:8188".into()
 }
 fn default_data_dir() -> PathBuf {
     PathBuf::from("./data")
-}
-fn default_workflow() -> String {
-    "flux2_klein_edit".into()
-}
-fn default_enabled_workflows() -> Vec<String> {
-    vec![
-        "flux2_klein_edit".into(),
-        "flux2_klein_9b_kv_experimental".into(),
-    ]
 }
 
 /// Log output format. Defaults to `auto` (pretty when stderr is a TTY, JSON otherwise).
@@ -60,27 +36,45 @@ pub enum LogFormat {
 }
 
 impl Config {
-    pub fn load() -> anyhow::Result<Self> {
-        Self::from_file("config.toml")
-    }
-
-    pub fn from_file(path: impl AsRef<Path>) -> anyhow::Result<Self> {
-        let path = path.as_ref();
-        let text = std::fs::read_to_string(path)
-            .map_err(|e| anyhow::anyhow!("cannot read {}: {}", path.display(), e))?;
-        let config: Self = toml::from_str(&text)
+    /// Read a config from disk and resolve relative paths against the
+    /// config file's parent directory. The latter is what makes
+    /// `cargo install`'d binaries work from arbitrary CWDs: a value like
+    /// `data_dir = "./data"` consistently means "next to config.toml",
+    /// not "next to wherever the user happens to be `cd`'d."
+    pub fn load(path: &Path) -> anyhow::Result<Self> {
+        let text = std::fs::read_to_string(path).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                anyhow::anyhow!(missing_config_message(path))
+            } else {
+                anyhow::anyhow!("cannot read {}: {}", path.display(), e)
+            }
+        })?;
+        let mut config: Self = toml::from_str(&text)
             .map_err(|e| anyhow::anyhow!("invalid {}: {}", path.display(), e))?;
+        if config.token == "REPLACE_ME_RUN_JUST_SETUP" {
+            anyhow::bail!(
+                "token is still the example placeholder; run `just setup` to generate a real one"
+            );
+        }
         if config.token.len() < 16 {
             anyhow::bail!("token must be at least 16 characters");
         }
+        let base = path.parent().unwrap_or_else(|| Path::new("."));
+        if config.data_dir.is_relative() {
+            config.data_dir = base.join(&config.data_dir);
+        }
         Ok(config)
     }
+}
 
-    /// Resolved workflow templates directory: explicit `workflows_dir` if set,
-    /// otherwise `<data_dir>/workflows`.
-    pub fn resolved_workflows_dir(&self) -> PathBuf {
-        self.workflows_dir
-            .clone()
-            .unwrap_or_else(|| self.data_dir.join("workflows"))
-    }
+fn missing_config_message(path: &Path) -> String {
+    format!(
+        "config file not found at {p}\n\
+         to create one:\n  \
+           cp config.example.toml config.toml\n  \
+           # then edit it: set `token`\n\
+         or supply an explicit path:\n  \
+           zun-rust-server --config /path/to/config.toml",
+        p = path.display(),
+    )
 }

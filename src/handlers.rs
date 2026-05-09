@@ -616,21 +616,8 @@ pub async fn cancel_job(
     if res.rows_affected() == 0 {
         return Err(AppError::NotFound);
     }
-    // Diffusers path: SIGKILL the in-flight python runner via the cancel
-    // channel the worker registered. No-op if this job isn't the one
-    // currently in the Diffusers branch.
-    let diffusers_signal = {
-        let mut guard = state.running_diffusers_cancel.lock();
-        match guard.as_ref() {
-            Some(c) if c.job_id == job_id => guard.take(),
-            _ => None,
-        }
-    };
-    if let Some(entry) = diffusers_signal {
-        let _ = entry.tx.send(());
-    }
-    // ComfyUI path: best-effort /interrupt. If the job was queued and never
-    // made it to the GPU, this is a harmless no-op. Either way we've already
+    // Best-effort /interrupt. If the job was queued and never made it to
+    // the GPU, this is a harmless no-op. Either way we've already
     // transitioned the row, so the worker's downstream mark_failed (which is
     // gated on status='running') will be a no-op too.
     if let Err(e) = state.comfy.interrupt().await {

@@ -1,0 +1,71 @@
+{
+  "4": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "INPUT_IMAGE_PLACEHOLDER"
+    }
+  },
+  "14": {
+    "class_type": "SAMModelLoader (segment anything)",
+    "inputs": {
+      "model_name": "sam_vit_l (1.25GB)"
+    }
+  },
+  "15": {
+    "class_type": "GroundingDinoModelLoader (segment anything)",
+    "inputs": {
+      "model_name": "GroundingDINO_SwinT_OGC (694MB)"
+    }
+  },
+  "16": {
+    "class_type": "GroundingDinoSAMSegment (segment anything)",
+    "inputs": {
+      "sam_model": ["14", 0],
+      "grounding_dino_model": ["15", 0],
+      "image": ["4", 0],
+      "prompt": "MASK_PROMPT_PLACEHOLDER",
+      "threshold": 0.3
+    }
+  },
+  "19": {
+    "class_type": "GrowMask",
+    "inputs": {
+      "mask": ["16", 1],
+      "expand": 25,
+      "tapered_corners": true
+    }
+  },
+  "17": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": ["16", 0],
+      "filename_prefix": "mask_preview_boxes"
+    }
+  },
+  "22": {
+    "class_type": "MaskToImage",
+    "inputs": {
+      "mask": ["16", 1]
+    }
+  },
+  "23": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": ["22", 0],
+      "filename_prefix": "mask_preview_raw"
+    }
+  },
+  "20": {
+    "class_type": "MaskToImage",
+    "inputs": {
+      "mask": ["19", 0]
+    }
+  },
+  "21": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": ["20", 0],
+      "filename_prefix": "mask_preview_grown"
+    }
+  }
+}

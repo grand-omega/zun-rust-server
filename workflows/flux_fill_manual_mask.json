@@ -1,0 +1,103 @@
+{
+  "1": {
+    "class_type": "UNETLoader",
+    "inputs": {
+      "unet_name": "flux1-fill-dev.safetensors",
+      "weight_dtype": "fp8_e4m3fn"
+    }
+  },
+  "2": {
+    "class_type": "DualCLIPLoader",
+    "inputs": {
+      "clip_name1": "clip_l.safetensors",
+      "clip_name2": "t5xxl_fp8_e4m3fn_scaled.safetensors",
+      "type": "flux",
+      "device": "default"
+    }
+  },
+  "3": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "ae.safetensors"
+    }
+  },
+  "4": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "INPUT_IMAGE_PLACEHOLDER"
+    }
+  },
+  "5": {
+    "class_type": "LoadImageMask",
+    "inputs": {
+      "image": "MASK_IMAGE_PLACEHOLDER",
+      "channel": "red"
+    }
+  },
+  "6": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "clip": ["2", 0],
+      "text": "PROMPT_PLACEHOLDER"
+    }
+  },
+  "7": {
+    "class_type": "FluxGuidance",
+    "inputs": {
+      "conditioning": ["6", 0],
+      "guidance": 30.0
+    }
+  },
+  "8": {
+    "class_type": "ConditioningZeroOut",
+    "inputs": {
+      "conditioning": ["6", 0]
+    }
+  },
+  "9": {
+    "class_type": "DifferentialDiffusion",
+    "inputs": {
+      "model": ["1", 0]
+    }
+  },
+  "10": {
+    "class_type": "InpaintModelConditioning",
+    "inputs": {
+      "positive": ["7", 0],
+      "negative": ["8", 0],
+      "vae": ["3", 0],
+      "pixels": ["4", 0],
+      "mask": ["5", 0],
+      "noise_mask": true
+    }
+  },
+  "11": {
+    "class_type": "KSampler",
+    "inputs": {
+      "seed": "SEED_PLACEHOLDER",
+      "steps": 20,
+      "cfg": 1.0,
+      "sampler_name": "euler",
+      "scheduler": "normal",
+      "denoise": 1.0,
+      "model": ["9", 0],
+      "positive": ["10", 0],
+      "negative": ["10", 1],
+      "latent_image": ["10", 2]
+    }
+  },
+  "12": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": ["11", 0],
+      "vae": ["3", 0]
+    }
+  },
+  "13": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": ["12", 0],
+      "filename_prefix": "FILENAME_PREFIX_PLACEHOLDER"
+    }
+  }
+}

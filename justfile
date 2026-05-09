@@ -1,42 +1,40 @@
 # zun-rust-server recipes. Run `just --list` to see them.
 #
-# First-time setup:
-#   cp config.example.toml config.toml   # then edit: set token, bind address
-#   cargo run
+# First time on a new box:
+#   just setup        # generates config.toml with a fresh bearer token
+#   just run          # starts the server (debug build)
+#
+# Token rotation:
+#   rm config.toml && just setup
+#   then paste the new token into the Android client + password manager.
 
 # Show available recipes.
 default:
     @just --list
 
-# Print the current token from config.toml.
-token:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if [[ ! -f config.toml ]]; then
-        echo "error: config.toml does not exist. copy from config.example.toml" >&2
-        exit 1
-    fi
-    VAL=$(grep '^token' config.toml | cut -d'"' -f2 || true)
-    if [[ -z "$VAL" ]]; then
-        echo "error: token is empty in config.toml" >&2
-        exit 1
-    fi
-    echo "$VAL"
+# Run the server with ./config.toml (debug build for fast iteration; use
+# `cargo run --release -- --config config.toml` on prod boxes).
+run:
+    cargo run --release -- --config config.toml
 
-# Bootstrap: copy config if it doesn't exist yet. v2 prompts live in the DB.
+# Generate config.toml from config.example.toml with a fresh bearer
+# token. Refuses to overwrite — delete config.toml first to regenerate.
 setup:
     #!/usr/bin/env bash
     set -euo pipefail
     if [[ -f config.toml ]]; then
-        echo "config.toml already exists — leaving it alone."
-    else
-        cp config.example.toml config.toml
-        chmod 600 config.toml
-        echo "wrote config.toml — edit it: set token and bind address."
+        echo "error: config.toml already exists. rm it first to regenerate." >&2
+        exit 1
     fi
-    echo "next: cargo run"
-    echo "then: just seed-prompts"
-
-# Seed the starter prompts into the default admin user.
-seed-prompts:
-    cargo run --bin zun-admin -- seed-prompts admin --from starter_prompts.toml
+    TOKEN=$(openssl rand -hex 32)
+    sed "s|REPLACE_ME_RUN_JUST_SETUP|${TOKEN}|" config.example.toml > config.toml
+    chmod 600 config.toml
+    echo
+    echo "================================================================"
+    echo "  bearer token (paste into Android client + password manager):"
+    echo
+    echo "    ${TOKEN}"
+    echo
+    echo "  wrote config.toml. on prod, swap the comment markers between"
+    echo "  the DEV and PROD blocks before running."
+    echo "================================================================"
