@@ -6,7 +6,7 @@ Single-user, self-hosted. Plain HTTP backend designed to live behind a reverse p
 
 ## Status
 
-**v0.4.0-dev** — building on v0.3.0; commits to plain HTTP behind a reverse proxy and trims multi-tenant scaffolding (per-IP rate limiter, proactive health probe, request-ID propagation) that doesn't earn its keep on a single-user box. v0.3.0 was API-complete, end-to-end verified against FLUX2 klein (~7 s per job on RTX 4070 Ti Super).
+**v2.0.0** — first stable release. Major version tracks the Android client: 2.x clients pair with the 2.0 server. Plain HTTP behind a reverse proxy; multi-tenant scaffolding (per-IP rate limiter, proactive health probe, request-ID propagation) intentionally absent — see `docs/API_CONTRACT.md` for the surface. Verified against FLUX2 klein (~7 s per job on RTX 4070 Ti Super).
 
 ## Quick start
 
@@ -37,7 +37,7 @@ Hit `/api/v1/health` to verify:
 
 ```bash
 curl -s localhost:8080/api/v1/health | jq
-# { "status": "ok", "version": "0.4.0-dev", "disk": { "data_bytes": 0 } }
+# { "status": "ok", "version": "2.0.0", "disk": { "data_bytes": 0 } }
 ```
 
 ## Configuration
