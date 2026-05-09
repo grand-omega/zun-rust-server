@@ -1,10 +1,9 @@
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
 use zun_rust_server::{
-    AppState, Config, auth::AuthLimiter, backup, comfy::ComfyClient, comfy_monitor, db,
-    hash::sha256_hex, logging, purge, router, worker, workflow,
+    AppState, Config, backup, comfy::ComfyClient, db, hash::sha256_hex, logging, purge, router,
+    worker, workflow,
 };
 
 #[tokio::main]
@@ -33,23 +32,19 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let comfy = ComfyClient::new(&config.comfy_url)?;
-    let comfy_health = comfy_monitor::new_handle();
     let (worker_tx, worker_rx) = mpsc::channel::<()>(1);
 
     let state = AppState {
         db: pool,
         config: config.clone(),
         workflows: Arc::new(workflows),
-        comfy: comfy.clone(),
-        comfy_health: comfy_health.clone(),
+        comfy,
         worker_tx,
-        auth_limiter: AuthLimiter::new(),
         disk_usage_cache: Arc::new(parking_lot::Mutex::new(None)),
     };
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
-    comfy_monitor::spawn(comfy, comfy_health, shutdown_rx.clone());
     worker::spawn(state.clone(), worker_rx, shutdown_rx.clone());
     purge::spawn(state.clone(), shutdown_rx.clone());
     backup::spawn(
@@ -68,10 +63,7 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(addr = %config.bind, "zun-rust-server listening");
 
     let mut axum_shutdown_rx = shutdown_rx;
-    axum::serve(
-        listener,
-        router(state).into_make_service_with_connect_info::<SocketAddr>(),
-    )
+    axum::serve(listener, router(state).into_make_service())
     .with_graceful_shutdown(async move {
         while !*axum_shutdown_rx.borrow() {
             if axum_shutdown_rx.changed().await.is_err() {

@@ -4,10 +4,7 @@ use parking_lot::Mutex;
 use sqlx::SqlitePool;
 use tokio::sync::mpsc;
 
-use crate::{
-    Config, auth::AuthLimiter, comfy::ComfyClient, comfy_monitor::ComfyHealthHandle,
-    workflow::WorkflowRegistry,
-};
+use crate::{Config, comfy::ComfyClient, workflow::WorkflowRegistry};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -17,15 +14,10 @@ pub struct AppState {
     /// `data/workflows/*.json`.
     pub workflows: Arc<WorkflowRegistry>,
     pub comfy: ComfyClient,
-    /// Latest known ComfyUI reachability; updated by the monitor task,
-    /// read by `/api/v1/health`.
-    pub comfy_health: ComfyHealthHandle,
     /// One-slot channel used by the submit handler to wake the worker
     /// when a new job is inserted. `try_send` is always used — filling
     /// the channel means the worker already has one wake pending.
     pub worker_tx: mpsc::Sender<()>,
-    /// Per-IP sliding-window limiter for failed auth attempts.
-    pub auth_limiter: AuthLimiter,
     /// Cached disk-usage measurement for `/health`. Walking the data dir
     /// is fast on a personal box but we don't want every health probe to
     /// trigger it; cache the result for ~60s.

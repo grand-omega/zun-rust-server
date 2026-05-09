@@ -1,7 +1,6 @@
 pub mod auth;
 pub mod backup;
 pub mod comfy;
-pub mod comfy_monitor;
 pub mod config;
 pub mod custom_prompts;
 pub mod db;
@@ -25,17 +24,14 @@ pub use state::AppState;
 use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, State},
-    http::{Request, header},
+    http::header,
     middleware,
     routing::{get, post},
 };
 use serde_json::json;
 use tower::ServiceBuilder;
 use tower_http::{
-    request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
-    sensitive_headers::SetSensitiveRequestHeadersLayer,
-    timeout::TimeoutLayer,
-    trace::TraceLayer,
+    sensitive_headers::SetSensitiveRequestHeadersLayer, timeout::TimeoutLayer, trace::TraceLayer,
 };
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -109,38 +105,12 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
         .merge(authed);
 
-    // ServiceBuilder layer order: first .layer() = OUTERMOST. The propagate
-    // layer must sit OUTSIDE TimeoutLayer so that 408 responses synthesized
-    // by Timeout (which short-circuits inner layers) still get x-request-id
-    // copied onto them — log correlation matters most exactly when a
-    // request times out.
-    //
-    // SetRequestIdLayer only inserts x-request-id when the request doesn't
-    // already carry one, so an upstream X-Request-Id forwarded by the
-    // reverse proxy (e.g. Caddy `header_up X-Request-Id {http.request.uuid}`)
-    // is preserved end-to-end; if the proxy sends nothing, we mint a UUID.
     app.layer(
         ServiceBuilder::new()
             .layer(SetSensitiveRequestHeadersLayer::new(std::iter::once(
                 header::AUTHORIZATION,
             )))
-            .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
-            .layer(PropagateRequestIdLayer::x_request_id())
-            .layer(
-                TraceLayer::new_for_http().make_span_with(|req: &Request<_>| {
-                    let id = req
-                        .headers()
-                        .get("x-request-id")
-                        .and_then(|v| v.to_str().ok())
-                        .unwrap_or("");
-                    tracing::info_span!(
-                        "request",
-                        id = %id,
-                        method = %req.method(),
-                        uri = %req.uri(),
-                    )
-                }),
-            )
+            .layer(TraceLayer::new_for_http())
             .layer(TimeoutLayer::with_status_code(
                 axum::http::StatusCode::REQUEST_TIMEOUT,
                 REQUEST_TIMEOUT,
@@ -149,15 +119,9 @@ pub fn router(state: AppState) -> Router {
 }
 
 async fn capabilities(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let h = state.comfy_health.read().await;
     let workflows = state.workflows.support_list();
     Json(json!({
         "version": VERSION,
-        "comfy": {
-            "reachable": h.is_healthy(),
-            "last_ok_at": h.last_ok_at,
-            "consecutive_failures": h.consecutive_failures,
-        },
         "features": {
             "image_edit": state.workflows.supported_count() > 0,
             "auto_mask": false,
@@ -170,19 +134,13 @@ async fn capabilities(State(state): State<AppState>) -> Json<serde_json::Value> 
     }))
 }
 
-/// Liveness + ComfyUI reachability + cached disk usage. Unauthenticated —
-/// Android uses this to show a connection banner.
+/// Liveness + cached disk usage. Unauthenticated so external probes and the
+/// Android client can verify reachability before they have a token.
 async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let h = state.comfy_health.read().await;
     let disk_bytes = compute_or_reuse_disk_usage(&state).await;
     Json(json!({
         "status": "ok",
         "version": VERSION,
-        "comfy": {
-            "ok": h.is_healthy(),
-            "last_ok_at": h.last_ok_at,
-            "consecutive_failures": h.consecutive_failures,
-        },
         "disk": {
             "data_bytes": disk_bytes,
         }

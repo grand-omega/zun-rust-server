@@ -13,7 +13,6 @@
 # --- DEV (phone on LAN, no proxy) -----------------------------------------
 token = "REPLACE_ME_RUN_JUST_SETUP"
 bind = "0.0.0.0:8080"
-trusted_proxies = []
 comfy_url = "http://127.0.0.1:8188"
 data_dir = "./data"
 log_format = "auto"
@@ -21,7 +20,6 @@ log_format = "auto"
 # --- PROD (behind same-host reverse proxy, Rocky/RHEL) --------------------
 # token = "<openssl rand -hex 32>"
 # bind = "127.0.0.1:8080"
-# trusted_proxies = ["127.0.0.1", "::1"]
 # comfy_url = "http://127.0.0.1:8188"
 # data_dir = "/var/lib/zun-rust-server"
 # log_format = "json"
@@ -41,15 +39,6 @@ log_format = "auto"
 #     127.0.0.1:8080      same machine only           (PROD — behind a proxy)
 #     192.168.1.10:8080   one specific LAN interface
 #     100.64.0.5:8080     one specific tailnet interface
-#
-# trusted_proxies
-#   IPs/CIDRs whose X-Forwarded-For header is trusted as the real client
-#   IP (used for rate-limiting and audit logs). Anyone NOT in this list
-#   has their XFF ignored — it's just a request header any client can set.
-#     []                       no proxy in front       (DEV)
-#     ["127.0.0.1", "::1"]     same-host proxy         (PROD)
-#     ["192.168.1.5"]          one proxy on the LAN
-#     ["100.64.0.0/10"]        any Tailscale node
 #
 # comfy_url
 #   HTTP base for ComfyUI (project-zun's `just serve` default is :8188).
