@@ -11,9 +11,6 @@ pub enum AppError {
     #[error("unauthorized")]
     Unauthorized,
 
-    #[error("too many requests")]
-    TooManyRequests,
-
     #[error("not found")]
     NotFound,
 
@@ -36,7 +33,6 @@ impl AppError {
     fn status_and_code(&self) -> (StatusCode, &'static str) {
         match self {
             Self::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized"),
-            Self::TooManyRequests => (StatusCode::TOO_MANY_REQUESTS, "too_many_requests"),
             Self::NotFound => (StatusCode::NOT_FOUND, "not_found"),
             Self::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request"),
             Self::NotReady => (StatusCode::CONFLICT, "not_ready"),

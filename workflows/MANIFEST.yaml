@@ -1,0 +1,97 @@
+# Workflow manifest — source of truth for per-workflow metadata.
+#
+# Consumed by scripts/validate_workflows.py to check that each JSON
+# contains the declared placeholders and no stray hardcoded values.
+# zun-rust-server can also consult this to route requests correctly
+# (e.g., reject a job whose prompt binds to a t2i workflow if the
+# request lacks an input image).
+#
+# Schema:
+#   <stem>:
+#     family:       flux2_klein | flux1_fill | utility
+#     kind:         t2i | edit | internal
+#     inputs:       list of required inputs — subset of {image, mask, reference}
+#     placeholders: list of required placeholders in this workflow
+#     public:       true if server-facing; false for internal-only
+#     notes:        optional freeform
+
+flux2_klein_edit:
+  family: flux2_klein
+  kind: edit
+  inputs: [image]
+  placeholders: [PROMPT_PLACEHOLDER, INPUT_IMAGE_PLACEHOLDER, FILENAME_PREFIX_PLACEHOLDER, SEED_PLACEHOLDER]
+  public: true
+  notes: Primary v1 target for the Rust server — fast maskless edit.
+
+flux2_klein_t2i:
+  family: flux2_klein
+  kind: t2i
+  inputs: []
+  placeholders: [PROMPT_PLACEHOLDER, FILENAME_PREFIX_PLACEHOLDER, SEED_PLACEHOLDER]
+  public: true
+
+flux2_klein_lora_edit:
+  family: flux2_klein
+  kind: edit
+  inputs: [image]
+  placeholders: [PROMPT_PLACEHOLDER, INPUT_IMAGE_PLACEHOLDER, FILENAME_PREFIX_PLACEHOLDER, LORA_PLACEHOLDER, SEED_PLACEHOLDER]
+  public: true
+  notes: LoRA edit — server integration deferred to v2 (server ignores LoRA field in v1).
+
+flux2_klein_lora_t2i:
+  family: flux2_klein
+  kind: t2i
+  inputs: []
+  placeholders: [PROMPT_PLACEHOLDER, FILENAME_PREFIX_PLACEHOLDER, LORA_PLACEHOLDER, SEED_PLACEHOLDER]
+  public: true
+
+flux2_klein_ref_edit:
+  family: flux2_klein
+  kind: edit
+  inputs: [image, reference]
+  placeholders: [PROMPT_PLACEHOLDER, INPUT_IMAGE_PLACEHOLDER, REFERENCE_IMAGE_PLACEHOLDER, FILENAME_PREFIX_PLACEHOLDER, SEED_PLACEHOLDER]
+  public: true
+  notes: Two-image conditioning — requires API extension to accept reference image.
+
+flux_fill_auto_mask:
+  family: flux1_fill
+  kind: edit
+  inputs: [image]
+  placeholders: [PROMPT_PLACEHOLDER, INPUT_IMAGE_PLACEHOLDER, FILENAME_PREFIX_PLACEHOLDER, MASK_PROMPT_PLACEHOLDER, SEED_PLACEHOLDER]
+  public: true
+  notes: Secondary v1 target — mask-based inpainting via GDINO+SAM auto-mask.
+
+flux_fill_auto_mask_safe:
+  family: flux1_fill
+  kind: edit
+  inputs: [image]
+  placeholders: [PROMPT_PLACEHOLDER, INPUT_IMAGE_PLACEHOLDER, FILENAME_PREFIX_PLACEHOLDER, MASK_PROMPT_PLACEHOLDER, SEED_PLACEHOLDER]
+  public: true
+  notes: Like flux_fill_auto_mask but excludes face/hair/head from the mask.
+
+flux_fill_lora_auto_mask:
+  family: flux1_fill
+  kind: edit
+  inputs: [image]
+  placeholders: [PROMPT_PLACEHOLDER, INPUT_IMAGE_PLACEHOLDER, FILENAME_PREFIX_PLACEHOLDER, MASK_PROMPT_PLACEHOLDER, LORA_PLACEHOLDER, SEED_PLACEHOLDER]
+  public: true
+
+flux_fill_manual_mask:
+  family: flux1_fill
+  kind: edit
+  inputs: [image, mask]
+  placeholders: [PROMPT_PLACEHOLDER, INPUT_IMAGE_PLACEHOLDER, MASK_IMAGE_PLACEHOLDER, FILENAME_PREFIX_PLACEHOLDER, SEED_PLACEHOLDER]
+  public: true
+  notes: Requires the caller to supply a black-and-white mask image.
+
+mask_preview:
+  family: utility
+  kind: internal
+  inputs: [image]
+  placeholders: [INPUT_IMAGE_PLACEHOLDER, MASK_PROMPT_PLACEHOLDER]
+  public: false
+  notes: |
+    Internal debug workflow used by scripts/face_restore.py. Has no
+    primary result SaveImage (emits three mask-visualization PNGs with
+    fixed prefixes that drivers classify as mask_boxes/raw/grown).
+    Not intended to be called by the Rust server.

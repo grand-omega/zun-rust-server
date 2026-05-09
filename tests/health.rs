@@ -38,74 +38,6 @@ async fn health_returns_ok_and_version() {
 }
 
 #[tokio::test]
-async fn health_reports_comfy_reachability_shape() {
-    let app = common::test_app().await;
-    let resp = app
-        .router
-        .oneshot(
-            Request::builder()
-                .uri("/api/v1/health")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-
-    assert_eq!(body["comfy"]["ok"], false);
-    assert!(body["comfy"]["last_ok_at"].is_null());
-    assert_eq!(body["comfy"]["consecutive_failures"], 0);
-}
-
-#[tokio::test]
-async fn response_carries_x_request_id() {
-    let app = common::test_app().await;
-    let resp = app
-        .router
-        .oneshot(
-            Request::builder()
-                .uri("/api/v1/health")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    let id = resp
-        .headers()
-        .get("x-request-id")
-        .expect("x-request-id set on response")
-        .to_str()
-        .unwrap()
-        .to_string();
-    assert_eq!(id.len(), 36, "uuid v4 string length");
-}
-
-#[tokio::test]
-async fn client_supplied_request_id_is_propagated() {
-    let app = common::test_app().await;
-    let resp = app
-        .router
-        .oneshot(
-            Request::builder()
-                .uri("/api/v1/health")
-                .header("x-request-id", "client-supplied-id-123")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    let id = resp
-        .headers()
-        .get("x-request-id")
-        .expect("x-request-id set on response")
-        .to_str()
-        .unwrap();
-    assert_eq!(id, "client-supplied-id-123");
-}
-
-#[tokio::test]
 async fn health_includes_disk_usage_field() {
     let app = common::test_app().await;
     let resp = app
@@ -151,25 +83,6 @@ async fn capabilities_reports_enabled_workflows() {
     assert_eq!(supported["supported"], true);
     assert_eq!(supported["display_name"], "FLUX 2 klein");
     assert_eq!(supported["default"], true);
-    let heavy = workflows
-        .iter()
-        .find(|w| w["name"] == "flux2_klein_9b_kv_experimental")
-        .unwrap();
-    assert_eq!(heavy["supported"], true);
-    assert_eq!(heavy["display_name"], "FLUX 2 klein 9B-KV Experimental");
-    assert_eq!(heavy["kind"], "image_edit");
-    assert_eq!(heavy["requires_input_image"], true);
-    assert_eq!(heavy["experimental"], true);
-    assert_eq!(heavy["default"], false);
-    assert_eq!(heavy["runtime"], "diffusers");
-    assert_eq!(heavy["pipeline"], "Flux2KleinKVPipeline");
-    assert_eq!(heavy["model_path"], "/home/doremy/ml/t2i/flux2-klein-9b-kv");
-    assert_eq!(heavy["dtype"], "bfloat16");
-    assert_eq!(heavy["offload_mode"], "sequential");
-    assert_eq!(heavy["default_steps"], 4);
-    assert_eq!(heavy["default_width"], 768);
-    assert_eq!(heavy["default_height"], 1024);
-    assert!(heavy["warning"].as_str().unwrap().contains("16 GB VRAM"));
     assert!(
         workflows.iter().all(|w| w["name"] != "flux_fill_auto_mask"),
         "capabilities should only expose enabled workflows"

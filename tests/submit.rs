@@ -257,21 +257,6 @@ async fn submit_prompt_text_with_workflow_works() {
 }
 
 #[tokio::test]
-async fn submit_prompt_text_with_9b_kv_experimental_model_works() {
-    let app = common::test_app().await;
-    let img = b"yyy";
-    let (ct, body) = common::multipart_submit(
-        img,
-        "image/jpeg",
-        None,
-        Some("free text"),
-        Some("flux2_klein_9b_kv_experimental"),
-    );
-    let resp = app.router.oneshot(submit_request(&ct, body)).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::ACCEPTED);
-}
-
-#[tokio::test]
 async fn get_unknown_job_is_404() {
     let app = common::test_app().await;
     let resp = app

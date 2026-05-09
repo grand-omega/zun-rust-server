@@ -1,42 +1,64 @@
-# Copy to config.toml (gitignored) and fill in your values.
-# Quickest start: cp config.example.toml config.toml, then set token.
+# zun-rust-server config.
+#
+# Setup:  cp config.example.toml config.toml
+#         openssl rand -hex 32   # paste output as `token`
+#         cargo run              # dev
+#         zun-rust-server --config /etc/zun-rust-server/config.toml   # prod
+#
+# Two profiles below — DEV is active, PROD is commented. Swap the comment
+# markers to switch.
+#
+# Relative paths (data_dir) resolve against THIS file's directory.
 
-# Bearer token the Android app sends as `Authorization: Bearer <token>`.
-# Must be at least 16 characters. Generate one with:
-#   openssl rand -hex 32
-token = "1111111111111111"
-
-# Address the server listens on.
-# 127.0.0.1:8080  — dev (localhost only)
-# 192.168.1.x:8080 — home LAN
-# <tailscale-ip>:8080 — prod via Tailscale
+# --- DEV (phone on LAN, no proxy) -----------------------------------------
+token = "REPLACE_ME_RUN_JUST_SETUP"
 bind = "0.0.0.0:8080"
-
-# ComfyUI HTTP endpoint (project-zun's `just serve` default).
 comfy_url = "http://127.0.0.1:8188"
-
-# Where jobs.db, inputs/, outputs/, and thumbs/ are stored.
 data_dir = "./data"
-
-# Directory holding ComfyUI workflow templates (`*.json`). Authored in the
-# sibling project-zun repo; the server loads them at startup. If unset,
-# defaults to `<data_dir>/workflows`. Set this when project-zun lives on
-# a different host or path than this server's data_dir.
-# workflows_dir = "/path/to/project-zun/workflows"
-
-# Explicit workflows exposed to Android. ComfyUI workflows must have a
-# matching `<name>.json` in workflows_dir. The experimental 9B-KV workflow
-# is Diffusers-backed and does not load a JSON template.
-default_workflow = "flux2_klein_edit"
-enabled_workflows = [
-  "flux2_klein_edit",
-  "flux2_klein_9b_kv_experimental",
-]
-
-# On-disk path to the FLUX2 9B-KV weights. Required only when the
-# `flux2_klein_9b_kv_experimental` virtual workflow is used; recorded in
-# audit logs and per-job sidecar metadata.
-# diffusers_model_path = "/path/to/flux2-klein-9b-kv"
-
-# Log format: "auto" (pretty on TTY, JSON otherwise), "pretty", or "json".
 log_format = "auto"
+
+# --- PROD (behind same-host reverse proxy, Rocky/RHEL) --------------------
+# token = "<openssl rand -hex 32>"
+# bind = "127.0.0.1:8080"
+# comfy_url = "http://127.0.0.1:8188"
+# data_dir = "/var/lib/zun-rust-server"
+# log_format = "json"
+
+
+# === Reference ============================================================
+#
+# token
+#   Secret your Android client sends as `Authorization: Bearer <token>`.
+#   Required, at least 16 chars. Generate with: openssl rand -hex 32.
+#   Without this, anyone hitting the port could control the server.
+#
+# bind
+#   Where the server listens, as "<address>:<port>". Controls *who* can
+#   connect at the network level, not just the port number.
+#     0.0.0.0:8080        any network interface       (DEV — phone on LAN)
+#     127.0.0.1:8080      same machine only           (PROD — behind a proxy)
+#     192.168.1.10:8080   one specific LAN interface
+#     100.64.0.5:8080     one specific tailnet interface
+#
+# comfy_url
+#   HTTP base for ComfyUI (project-zun's `just serve` default is :8188).
+#   Same value dev and prod when ComfyUI runs on the same machine.
+#
+# data_dir
+#   Where the server stores jobs.db, outputs/, thumbs/, previews/, and
+#   cache/inputs/. Backups = `tar` this directory.
+#   Relative paths resolve against THIS file's directory, NOT your
+#   shell's CWD — the binary behaves the same wherever you run it from.
+#     "./data"                       next to the repo       (DEV)
+#     "/var/lib/zun-rust-server"     FHS, system service    (PROD)
+#
+# log_format
+#   How log lines are printed.
+#     "auto"     pretty in a terminal, JSON when piped  (good default)
+#     "pretty"   always colored text                    (DEV)
+#     "json"     always JSON, plays well with journald  (PROD)
+#
+# Not in this file (and intentionally so):
+#   - No environment variables. The TOML is the only source of truth.
+#   - No XDG / implicit path discovery. You set `data_dir` explicitly.
+#   - No workflow knobs. Workflows are baked into the binary.
