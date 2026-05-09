@@ -6,7 +6,7 @@ Single-user, self-hosted. Plain HTTP backend designed to live behind a reverse p
 
 ## Status
 
-**v0.4.0-dev** (caddy-proxy branch) — building on v0.3.0; commits to plain HTTP behind a reverse proxy and adds `trusted_proxies` (CIDR-aware) for correct per-client throttling and audit-log attribution. v0.3.0 was API-complete, end-to-end verified against FLUX2 klein (~7 s per job on RTX 4070 Ti Super).
+**v0.4.0-dev** — building on v0.3.0; commits to plain HTTP behind a reverse proxy and trims multi-tenant scaffolding (per-IP rate limiter, proactive health probe, request-ID propagation) that doesn't earn its keep on a single-user box. v0.3.0 was API-complete, end-to-end verified against FLUX2 klein (~7 s per job on RTX 4070 Ti Super).
 
 ## Quick start
 
@@ -28,16 +28,16 @@ cargo install --path .
 zun-rust-server --config /etc/zun/config.toml
 ```
 
-Relative paths in `config.toml` (`data_dir`, `workflows_dir`) are
-resolved against the config file's parent directory, not the current
-working directory — a `cargo install`'d binary works the same regardless
-of where you run it from.
+Relative paths in `config.toml` (`data_dir`) are resolved against the
+config file's parent directory, not the current working directory — a
+`cargo install`'d binary works the same regardless of where you run it
+from.
 
 Hit `/api/v1/health` to verify:
 
 ```bash
 curl -s localhost:8080/api/v1/health | jq
-# { "status": "ok", "version": "0.1.0", "comfy": { "ok": true, ... } }
+# { "status": "ok", "version": "0.4.0-dev", "disk": { "data_bytes": 0 } }
 ```
 
 ## Configuration
@@ -51,14 +51,13 @@ section; in short:
 |---|---|---|
 | `token` | — (required) | Bearer token for the Android client |
 | `bind` | `127.0.0.1:8080` | Listen address — server speaks plain HTTP |
-| `trusted_proxies` | `["127.0.0.1", "::1"]` | Peer IPs / CIDRs whose `X-Forwarded-For` is honored |
 | `comfy_url` | `http://127.0.0.1:8188` | ComfyUI HTTP base |
 | `data_dir` | `./data` | Houses `jobs.db` and `{cache,outputs,thumbs,previews}/` |
 | `log_format` | `auto` | `auto` (pretty on TTY, JSON otherwise), `pretty`, or `json` |
 
 Workflows are baked into the binary at compile time — there is no
-runtime knob to swap them. To pull updated templates from the authoring
-repo run `just sync-workflows` and rebuild.
+runtime knob to swap them. To update templates, edit the files under
+`workflows/` and rebuild.
 
 `RUST_LOG` env var still works for log-level tuning (e.g. `RUST_LOG=debug`).
 
@@ -81,15 +80,8 @@ Workflow templates are vendored at `workflows/` (sibling of `src/`) and
 baked into the binary at compile time via `include_dir!`. The set
 exposed at runtime is gated by `ENABLED_WORKFLOWS` in
 `src/workflow.rs` — adding a new pipeline is a code change, not a
-config change. To pull updates from the authoring repo
-(`zun-flux-pipeline`):
-
-```bash
-just sync-workflows                          # default ../zun-flux-pipeline/workflows
-just sync-workflows /path/to/workflows       # explicit override
-```
-
-Then `cargo build` to rebuild with the new templates baked in.
+config change. To update, edit the files under `workflows/` (or copy
+new ones in from the authoring repo) and `cargo build`.
 
 ## Architecture
 
@@ -97,12 +89,11 @@ Then `cargo build` to rebuild with the new templates baked in.
 - **sqlx + SQLite** (WAL) for the job queue — no external DB
 - **reqwest (rustls)** to ComfyUI — pure Rust, no OpenSSL
 - Background **worker** drains the queue one job at a time; per-prompt timeout; crash recovery on restart
-- Background **health monitor** probes ComfyUI every 30 s; state exposed on `/api/health`
-- **tracing + tower-http** for request-ID spans, structured logs, header redaction
+- **tracing + tower-http** for structured logs and header redaction
 
 ## Security
 
-The server speaks plain HTTP and assumes a reverse proxy in front terminates TLS and gates network access (firewall, overlay-network membership, Caddy `@allowed` matchers, whatever fits your topology). The bearer token (`config.toml: token`) is the application-layer second factor. Failed auth attempts are throttled per client IP via a sliding window; behind a proxy this requires `trusted_proxies` to include the proxy's peer IP so `X-Forwarded-For` is honored.
+The server speaks plain HTTP and assumes a reverse proxy in front terminates TLS and gates network access (firewall, overlay-network membership, Caddy `@allowed` matchers, whatever fits your topology). The bearer token (`config.toml: token`) is the application-layer second factor. There is no in-server rate limiting; if you need brute-force protection on the token, add it at the proxy.
 
 ## Roadmap
 
