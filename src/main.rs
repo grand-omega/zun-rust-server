@@ -64,15 +64,15 @@ async fn main() -> anyhow::Result<()> {
 
     let mut axum_shutdown_rx = shutdown_rx;
     axum::serve(listener, router(state).into_make_service())
-    .with_graceful_shutdown(async move {
-        while !*axum_shutdown_rx.borrow() {
-            if axum_shutdown_rx.changed().await.is_err() {
-                return;
+        .with_graceful_shutdown(async move {
+            while !*axum_shutdown_rx.borrow() {
+                if axum_shutdown_rx.changed().await.is_err() {
+                    return;
+                }
             }
-        }
-        tracing::info!("server no longer accepting new connections; draining");
-    })
-    .await?;
+            tracing::info!("server no longer accepting new connections; draining");
+        })
+        .await?;
 
     tracing::info!("zun-rust-server exited cleanly");
     Ok(())
