@@ -90,6 +90,9 @@ fn parse_config_path() -> anyhow::Result<PathBuf> {
             let path = args
                 .next()
                 .ok_or_else(|| anyhow::anyhow!("--config requires a path argument"))?;
+            if let Some(extra) = args.next() {
+                anyhow::bail!("unexpected argument after --config <path>: {extra}");
+            }
             Ok(PathBuf::from(path))
         }
         other => anyhow::bail!("unknown argument: {other}"),
