@@ -283,12 +283,14 @@ Streams the full-resolution output (PNG/JPEG, content-type matches the file).
 
 ### `GET /api/v1/jobs/{id}/thumb`
 
-400 px JPEG thumbnail. Same response shape, headers, and `not_ready`
-semantics as `/result`. Generated lazily on first request.
+400 px thumbnail. Sends AVIF when `Accept` includes `image/avif`; otherwise
+sends JPEG. Same response shape, headers, and `not_ready` semantics as
+`/result`, plus `Vary: Accept`. Generated lazily on first request.
 
 ### `GET /api/v1/jobs/{id}/preview`
 
-~1280 px JPEG sized for full-screen phone viewing. Same semantics as `/thumb`.
+~1280 px image sized for full-screen phone viewing. Same AVIF/JPEG negotiation
+and caching semantics as `/thumb`.
 
 ---
 
