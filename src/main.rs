@@ -45,13 +45,23 @@ async fn main() -> anyhow::Result<()> {
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
-    worker::spawn(state.clone(), worker_rx, shutdown_rx.clone());
-    purge::spawn(state.clone(), shutdown_rx.clone());
-    backup::spawn(
+    let worker_handle = worker::spawn(state.clone(), worker_rx, shutdown_rx.clone());
+    let purge_handle = purge::spawn(state.clone(), shutdown_rx.clone());
+    let backup_handle = backup::spawn(
         state.db.clone(),
         state.config.data_dir.clone(),
         shutdown_rx.clone(),
     );
+    // Background tasks run "forever" and their JoinHandles are otherwise
+    // ignored — but if one panics, tokio just drops it silently: the HTTP
+    // server keeps answering `/health` while jobs/purge/backups quietly
+    // stop happening forever. Systemd's `Restart=on-failure` can't catch
+    // that because the *process* never exits. Supervise each task instead:
+    // any exit that wasn't triggered by our own shutdown signal is treated
+    // as fatal, so the whole process goes down and systemd restarts it.
+    supervise("worker", worker_handle, shutdown_rx.clone());
+    supervise("purge", purge_handle, shutdown_rx.clone());
+    supervise("backup", backup_handle, shutdown_rx.clone());
 
     tokio::spawn(async move {
         wait_for_shutdown_signal().await;
@@ -76,6 +86,38 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("zun-rust-server exited cleanly");
     Ok(())
+}
+
+/// Watches a background task's `JoinHandle`. Background tasks only ever
+/// return on their own once `shutdown` has flipped to `true` (see
+/// worker/purge/backup's loop bodies) — so any resolution observed while
+/// `shutdown` is still `false` means the task panicked or fell out of its
+/// loop unexpectedly. Either way that's a bug: exit the whole process so
+/// systemd's `Restart=on-failure` notices and recovers it, instead of
+/// leaving that subsystem silently dead while the HTTP server stays up.
+fn supervise(
+    name: &'static str,
+    handle: tokio::task::JoinHandle<()>,
+    shutdown: watch::Receiver<bool>,
+) {
+    tokio::spawn(async move {
+        let result = handle.await;
+        if *shutdown.borrow() {
+            return;
+        }
+        match result {
+            Ok(()) => tracing::error!(
+                task = name,
+                "background task exited unexpectedly (no shutdown signal received); exiting for supervisor restart"
+            ),
+            Err(e) => tracing::error!(
+                task = name,
+                error = %e,
+                "background task panicked; exiting for supervisor restart"
+            ),
+        }
+        std::process::exit(1);
+    });
 }
 
 /// Tiny hand-rolled flag parser. Looks for `--config <path>`; falls back
