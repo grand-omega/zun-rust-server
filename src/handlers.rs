@@ -603,24 +603,36 @@ pub async fn cancel_job(
     Path(job_id): Path<String>,
 ) -> Result<StatusCode, AppError> {
     let now = chrono::Utc::now().timestamp();
-    // Atomically transition queued→cancelled or running→cancelled so the
-    // worker can't race past us and mark the row done/failed.
-    let res = sqlx::query(
+    // Atomically transition running→cancelled first, distinguishing it from
+    // queued→cancelled: the worker runs exactly one job at a time, so
+    // ComfyUI's /interrupt targets whatever is currently executing. Calling
+    // it for a merely-queued job would abort a *different*, unrelated job
+    // that's actually running.
+    let running = sqlx::query(
         "UPDATE jobs SET status = 'cancelled', completed_at = ? \
-         WHERE id = ? AND status IN ('queued', 'running')",
+         WHERE id = ? AND status = 'running'",
     )
     .bind(now)
     .bind(&job_id)
     .execute(&state.db)
     .await?;
-    if res.rows_affected() == 0 {
-        return Err(AppError::NotFound);
+
+    let was_running = running.rows_affected() == 1;
+    if !was_running {
+        let queued = sqlx::query(
+            "UPDATE jobs SET status = 'cancelled', completed_at = ? \
+             WHERE id = ? AND status = 'queued'",
+        )
+        .bind(now)
+        .bind(&job_id)
+        .execute(&state.db)
+        .await?;
+        if queued.rows_affected() == 0 {
+            return Err(AppError::NotFound);
+        }
     }
-    // Best-effort /interrupt. If the job was queued and never made it to
-    // the GPU, this is a harmless no-op. Either way we've already
-    // transitioned the row, so the worker's downstream mark_failed (which is
-    // gated on status='running') will be a no-op too.
-    if let Err(e) = state.comfy.interrupt().await {
+
+    if was_running && let Err(e) = state.comfy.interrupt().await {
         tracing::warn!(%job_id, error = %e, "comfy /interrupt failed; row already cancelled");
     }
     tracing::info!(target: "audit", event = "job.cancelled", %job_id);

@@ -90,10 +90,11 @@ async fn serve_derived(
         "SELECT status, output_path, {column} FROM jobs \
          WHERE id = ? AND deleted_at IS NULL"
     );
-    let row: Option<(String, Option<String>, Option<String>)> = sqlx::query_as(&sql)
-        .bind(&job_id)
-        .fetch_optional(&state.db)
-        .await?;
+    let row: Option<(String, Option<String>, Option<String>)> =
+        sqlx::query_as(sqlx::AssertSqlSafe(sql))
+            .bind(&job_id)
+            .fetch_optional(&state.db)
+            .await?;
     let (status, output_path, mut derived_rel) = row.ok_or(AppError::NotFound)?;
     if status != "done" {
         return Err(AppError::NotReady);

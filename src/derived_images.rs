@@ -154,7 +154,7 @@ async fn render_and_persist(
     // Build the UPDATE dynamically. `column` is a hardcoded constant in
     // every call site — never user input — so string-substitution is safe.
     let sql = format!("UPDATE jobs SET {column} = ? WHERE id = ?");
-    sqlx::query(&sql)
+    sqlx::query(sqlx::AssertSqlSafe(sql))
         .bind(&rel)
         .bind(job_id)
         .execute(db)

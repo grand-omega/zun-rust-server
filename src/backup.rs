@@ -74,7 +74,7 @@ pub async fn snapshot_once(
     // escape single quotes defensively.
     let escaped = abs.to_string_lossy().replace('\'', "''");
     let sql = format!("VACUUM INTO '{escaped}'");
-    sqlx::query(&sql).execute(pool).await?;
+    sqlx::query(sqlx::AssertSqlSafe(sql)).execute(pool).await?;
     Ok(abs)
 }
 

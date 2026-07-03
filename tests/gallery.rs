@@ -4,6 +4,7 @@ use axum::{
 };
 use http_body_util::BodyExt;
 use tower::ServiceExt;
+use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method, matchers::path as mock_path};
 
 mod common;
 
@@ -266,6 +267,94 @@ async fn cancel_queued_job_marks_cancelled() {
 
     let (status,): (String,) = sqlx::query_as("SELECT status FROM jobs WHERE id = ?")
         .bind("j-cancel")
+        .fetch_one(&app.db)
+        .await
+        .unwrap();
+    assert_eq!(status, "cancelled");
+}
+
+#[tokio::test]
+async fn cancel_queued_job_does_not_interrupt_comfy() {
+    // Regression test: the worker runs exactly one job at a time, so
+    // cancelling a merely-queued job must NOT call ComfyUI's /interrupt —
+    // that would abort a different, unrelated job that's actually running.
+    let comfy = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(mock_path("/interrupt"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&comfy)
+        .await;
+
+    let app = common::test_app_with_comfy(&comfy.uri()).await;
+    let input_id =
+        common::seed_input(&app.db, app._tempdir.path(), &"a".repeat(64), Some(b"a")).await;
+    common::seed_job(
+        &app.db,
+        "j-cancel-queued",
+        "queued",
+        None,
+        Some("p"),
+        "flux2_klein_edit",
+        input_id,
+        1_700_000_000,
+        None,
+    )
+    .await;
+
+    let resp = app
+        .router
+        .clone()
+        .oneshot(authed("POST", "/api/v1/jobs/j-cancel-queued/cancel"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let (status,): (String,) = sqlx::query_as("SELECT status FROM jobs WHERE id = ?")
+        .bind("j-cancel-queued")
+        .fetch_one(&app.db)
+        .await
+        .unwrap();
+    assert_eq!(status, "cancelled");
+    // Drop of `comfy` verifies the `.expect(0)` mount above.
+}
+
+#[tokio::test]
+async fn cancel_running_job_interrupts_comfy() {
+    let comfy = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(mock_path("/interrupt"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&comfy)
+        .await;
+
+    let app = common::test_app_with_comfy(&comfy.uri()).await;
+    let input_id =
+        common::seed_input(&app.db, app._tempdir.path(), &"a".repeat(64), Some(b"a")).await;
+    common::seed_job(
+        &app.db,
+        "j-cancel-running",
+        "running",
+        None,
+        Some("p"),
+        "flux2_klein_edit",
+        input_id,
+        1_700_000_000,
+        None,
+    )
+    .await;
+
+    let resp = app
+        .router
+        .clone()
+        .oneshot(authed("POST", "/api/v1/jobs/j-cancel-running/cancel"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let (status,): (String,) = sqlx::query_as("SELECT status FROM jobs WHERE id = ?")
+        .bind("j-cancel-running")
         .fetch_one(&app.db)
         .await
         .unwrap();
