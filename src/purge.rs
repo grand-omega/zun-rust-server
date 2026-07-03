@@ -108,6 +108,19 @@ pub async fn run(state: &AppState, opts: PurgeOpts) -> anyhow::Result<PurgeRepor
     .await?;
 
     for (id, output_path, thumb_path, preview_path) in stale_jobs {
+        // The DB records only the JPEG derived paths; thumbs/previews also
+        // have an AVIF sibling rendered next to each JPEG (derived_images).
+        // Delete both, or retention leaks .avif files forever.
+        let avif_siblings: Vec<String> = [thumb_path.as_deref(), preview_path.as_deref()]
+            .into_iter()
+            .flatten()
+            .map(|rel| {
+                std::path::Path::new(rel)
+                    .with_extension("avif")
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
         for rel in [
             output_path.as_deref(),
             thumb_path.as_deref(),
@@ -115,6 +128,7 @@ pub async fn run(state: &AppState, opts: PurgeOpts) -> anyhow::Result<PurgeRepor
         ]
         .into_iter()
         .flatten()
+        .chain(avif_siblings.iter().map(String::as_str))
         {
             let abs = state.config.data_dir.join(rel);
             if opts.dry_run {

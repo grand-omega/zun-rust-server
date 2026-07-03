@@ -108,7 +108,7 @@ async fn fetch_oldest_queued(db: &SqlitePool) -> anyhow::Result<Option<QueuedJob
     let row = sqlx::query_as::<_, QueuedJob>(
         "SELECT id, input_id, prompt_text, workflow, timeout_seconds, seed \
          FROM jobs WHERE status = 'queued' AND deleted_at IS NULL \
-         ORDER BY created_at ASC LIMIT 1",
+         ORDER BY created_at ASC, id ASC LIMIT 1",
     )
     .fetch_optional(db)
     .await?;
@@ -282,7 +282,9 @@ async fn process_job(state: &AppState, job: &QueuedJob) -> anyhow::Result<()> {
     let progress_writer = tokio::spawn(async move {
         let mut last_written = 0.0f32;
         while let Some(p) = progress_rx.recv().await {
-            if p - last_written >= 0.02 {
+            // Multi-node workflows reset per-node progress; write decreases
+            // through so the bar tracks reality instead of freezing.
+            if p < last_written || p - last_written >= 0.02 {
                 last_written = p;
                 let _ =
                     sqlx::query("UPDATE jobs SET progress = ? WHERE id = ? AND status = 'running'")

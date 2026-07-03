@@ -500,3 +500,23 @@ async fn get_job_wait_returns_early_on_status_change() {
         "long-poll should return on change, took {elapsed:?}"
     );
 }
+
+#[tokio::test]
+async fn get_job_wait_returns_immediately_for_terminal_jobs() {
+    let app = common::test_app().await;
+    seed_inputs_and_jobs(&app, &[("t1", 100)]).await;
+
+    let started = std::time::Instant::now();
+    let resp = app
+        .router
+        .clone()
+        .oneshot(authed("GET", "/api/v1/jobs/t1?wait=10"))
+        .await
+        .unwrap();
+    let elapsed = started.elapsed();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "terminal job must not hold the long-poll window, took {elapsed:?}"
+    );
+}

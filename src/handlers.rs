@@ -568,7 +568,9 @@ pub async fn get_job(
         .ok_or(AppError::NotFound)?;
 
     let wait_secs = q.wait.unwrap_or(0).min(MAX_WAIT_SECONDS);
-    if wait_secs > 0 {
+    // Only hold the request for jobs that can still change; waiting on a
+    // terminal job would block the full window for nothing.
+    if wait_secs > 0 && matches!(row.status.as_str(), "queued" | "running") {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(wait_secs);
         let initial = (row.status.clone(), row.progress.to_bits());
         loop {
@@ -591,9 +593,12 @@ pub async fn get_job(
     let queue_position = if row.status == "queued" {
         let (ahead,): (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM jobs \
-             WHERE status = 'queued' AND deleted_at IS NULL AND created_at < ?",
+             WHERE status = 'queued' AND deleted_at IS NULL \
+             AND (created_at < ? OR (created_at = ? AND id < ?))",
         )
         .bind(row.created_at)
+        .bind(row.created_at)
+        .bind(&row.id)
         .fetch_one(&state.db)
         .await?;
         Some(ahead)
@@ -678,7 +683,7 @@ pub async fn cancel_job(
     .execute(&state.db)
     .await?;
 
-    let was_running = running.rows_affected() == 1;
+    let mut was_running = running.rows_affected() == 1;
     if !was_running {
         let queued = sqlx::query(
             "UPDATE jobs SET status = 'cancelled', completed_at = ? \
@@ -689,7 +694,21 @@ pub async fn cancel_job(
         .execute(&state.db)
         .await?;
         if queued.rows_affected() == 0 {
-            return Err(AppError::NotFound);
+            // The job may have been claimed queued→running between the two
+            // updates (the only transition out of queued). Retry the running
+            // arm once so that interleaving cancels instead of 404ing.
+            let claimed = sqlx::query(
+                "UPDATE jobs SET status = 'cancelled', completed_at = ? \
+                 WHERE id = ? AND status = 'running'",
+            )
+            .bind(now)
+            .bind(&job_id)
+            .execute(&state.db)
+            .await?;
+            if claimed.rows_affected() == 0 {
+                return Err(AppError::NotFound);
+            }
+            was_running = true;
         }
     }
 
