@@ -43,6 +43,17 @@ impl PurgeOpts {
             dry_run: false,
         }
     }
+
+    /// Like [`Self::defaults_now`], with both windows set from config's
+    /// `purge_after_days`.
+    pub fn for_retention_days_now(days: u32) -> Self {
+        let secs = i64::from(days) * 24 * 60 * 60;
+        Self {
+            delete_grace_seconds: secs,
+            cache_ttl_seconds: secs,
+            ..Self::defaults_now()
+        }
+    }
 }
 
 /// Spawn the daily purge task. First tick fires immediately on startup.
@@ -52,7 +63,8 @@ pub fn spawn(state: AppState, mut shutdown: watch::Receiver<bool>) -> tokio::tas
             if *shutdown.borrow() {
                 return;
             }
-            match run(&state, PurgeOpts::defaults_now()).await {
+            let opts = PurgeOpts::for_retention_days_now(state.config.purge_after_days);
+            match run(&state, opts).await {
                 Ok(report) => {
                     if report.jobs_hard_deleted + report.inputs_purged > 0 {
                         tracing::info!(

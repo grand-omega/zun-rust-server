@@ -50,6 +50,7 @@ async fn main() -> anyhow::Result<()> {
     backup::spawn(
         state.db.clone(),
         state.config.data_dir.clone(),
+        state.config.backup_keep_days,
         shutdown_rx.clone(),
     );
 
