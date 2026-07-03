@@ -13,11 +13,11 @@ use sqlx::SqlitePool;
 use tokio::sync::watch;
 
 const TICK: Duration = Duration::from_secs(24 * 60 * 60);
-const RETENTION_DAYS: u64 = 30;
 
 pub fn spawn(
     pool: SqlitePool,
     data_dir: std::path::PathBuf,
+    keep_days: u32,
     mut shutdown: watch::Receiver<bool>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -33,7 +33,7 @@ pub fn spawn(
                 ),
                 Err(e) => tracing::error!(error = %e, "backup snapshot failed"),
             }
-            if let Err(e) = prune_old(&data_dir).await {
+            if let Err(e) = prune_old(&data_dir, keep_days).await {
                 tracing::warn!(error = %e, "backup prune failed");
             }
             tokio::select! {
@@ -74,18 +74,19 @@ pub async fn snapshot_once(
     // escape single quotes defensively.
     let escaped = abs.to_string_lossy().replace('\'', "''");
     let sql = format!("VACUUM INTO '{escaped}'");
-    sqlx::query(&sql).execute(pool).await?;
+    sqlx::query(sqlx::AssertSqlSafe(sql)).execute(pool).await?;
     Ok(abs)
 }
 
-async fn prune_old(data_dir: &std::path::Path) -> anyhow::Result<()> {
+async fn prune_old(data_dir: &std::path::Path, keep_days: u32) -> anyhow::Result<()> {
     let dir = data_dir.join("backups");
     let mut entries = match tokio::fs::read_dir(&dir).await {
         Ok(e) => e,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(e.into()),
     };
-    let cutoff = std::time::SystemTime::now() - Duration::from_secs(RETENTION_DAYS * 24 * 60 * 60);
+    let cutoff =
+        std::time::SystemTime::now() - Duration::from_secs(u64::from(keep_days) * 24 * 60 * 60);
     while let Some(entry) = entries.next_entry().await? {
         let path = entry.path();
         if path.extension().and_then(|s| s.to_str()) != Some("db") {

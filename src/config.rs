@@ -13,6 +13,13 @@ pub struct Config {
     pub data_dir: PathBuf,
     #[serde(default)]
     pub log_format: LogFormat,
+    /// Days before soft-deleted jobs (and unused input cache files) are
+    /// hard-purged. Mirrors the app's undo window.
+    #[serde(default = "default_retention_days")]
+    pub purge_after_days: u32,
+    /// Days of daily database backups to keep in `data/backups/`.
+    #[serde(default = "default_retention_days")]
+    pub backup_keep_days: u32,
 }
 
 fn default_bind() -> String {
@@ -23,6 +30,9 @@ fn default_comfy_url() -> String {
 }
 fn default_data_dir() -> PathBuf {
     PathBuf::from("./data")
+}
+fn default_retention_days() -> u32 {
+    30
 }
 
 /// Log output format. Defaults to `auto` (pretty when stderr is a TTY, JSON otherwise).

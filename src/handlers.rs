@@ -9,6 +9,7 @@ use axum::{
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::time::Duration;
 
 use crate::{
     AppError, AppState,
@@ -430,6 +431,7 @@ struct JobSummaryRow {
     workflow: String,
     seed: i64,
     status: String,
+    progress: f64,
     created_at: i64,
     completed_at: Option<i64>,
 }
@@ -444,7 +446,7 @@ pub async fn list_jobs(
     // doesn't have a great parameter-list builder; the chained query_as
     // would need 8 variants, so use a single QueryBuilder.
     let mut qb = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
-        "SELECT id, input_id, source_prompt_id, prompt_text, workflow, seed, status, created_at, completed_at \
+        "SELECT id, input_id, source_prompt_id, prompt_text, workflow, seed, status, progress, created_at, completed_at \
          FROM jobs WHERE deleted_at IS NULL",
     );
 
@@ -498,6 +500,7 @@ pub async fn list_jobs(
                 "workflow": r.workflow,
                 "seed": r.seed,
                 "status": r.status,
+                "progress": r.progress,
                 "created_at": r.created_at,
                 "completed_at": r.completed_at,
                 "duration_seconds": duration_seconds,
@@ -519,6 +522,7 @@ struct JobFullRow {
     workflow: String,
     seed: i64,
     status: String,
+    progress: f64,
     error_message: Option<String>,
     created_at: i64,
     started_at: Option<i64>,
@@ -528,19 +532,79 @@ struct JobFullRow {
     output_path: Option<String>,
 }
 
-pub async fn get_job(
-    State(state): State<AppState>,
-    Path(job_id): Path<String>,
-) -> Result<Json<serde_json::Value>, AppError> {
-    let row: JobFullRow = sqlx::query_as(
-        "SELECT id, input_id, source_prompt_id, prompt_text, workflow, seed, status, \
+async fn fetch_job_row(
+    db: &sqlx::SqlitePool,
+    job_id: &str,
+) -> Result<Option<JobFullRow>, AppError> {
+    Ok(sqlx::query_as(
+        "SELECT id, input_id, source_prompt_id, prompt_text, workflow, seed, status, progress, \
          error_message, created_at, started_at, completed_at, width, height, output_path \
          FROM jobs WHERE id = ? AND deleted_at IS NULL",
     )
-    .bind(&job_id)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or(AppError::NotFound)?;
+    .bind(job_id)
+    .fetch_optional(db)
+    .await?)
+}
+
+#[derive(Deserialize)]
+pub struct GetJobQuery {
+    /// Long-poll window in seconds (capped at 30). When set, the response is
+    /// held until the job's status or progress changes, or the window ends.
+    wait: Option<u64>,
+}
+
+/// Longest long-poll window. Keeps well under the global 120s TimeoutLayer.
+const MAX_WAIT_SECONDS: u64 = 30;
+/// DB re-check cadence while a long-poll is held open.
+const WAIT_POLL_INTERVAL: Duration = Duration::from_millis(750);
+
+pub async fn get_job(
+    State(state): State<AppState>,
+    Path(job_id): Path<String>,
+    Query(q): Query<GetJobQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let mut row = fetch_job_row(&state.db, &job_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+
+    let wait_secs = q.wait.unwrap_or(0).min(MAX_WAIT_SECONDS);
+    // Only hold the request for jobs that can still change; waiting on a
+    // terminal job would block the full window for nothing.
+    if wait_secs > 0 && matches!(row.status.as_str(), "queued" | "running") {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(wait_secs);
+        let initial = (row.status.clone(), row.progress.to_bits());
+        loop {
+            tokio::time::sleep(WAIT_POLL_INTERVAL).await;
+            if tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            let current = fetch_job_row(&state.db, &job_id)
+                .await?
+                .ok_or(AppError::NotFound)?;
+            if (current.status.clone(), current.progress.to_bits()) != initial {
+                row = current;
+                break;
+            }
+        }
+    }
+
+    // How many queued jobs the worker will pick before this one
+    // (matches fetch_oldest_queued's created_at ASC order).
+    let queue_position = if row.status == "queued" {
+        let (ahead,): (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM jobs \
+             WHERE status = 'queued' AND deleted_at IS NULL \
+             AND (created_at < ? OR (created_at = ? AND id < ?))",
+        )
+        .bind(row.created_at)
+        .bind(row.created_at)
+        .bind(&row.id)
+        .fetch_one(&state.db)
+        .await?;
+        Some(ahead)
+    } else {
+        None
+    };
 
     let sidecar_metadata = read_output_sidecar_metadata(&state, &row).await;
 
@@ -552,6 +616,8 @@ pub async fn get_job(
         "workflow": row.workflow,
         "seed": row.seed,
         "status": row.status,
+        "progress": row.progress,
+        "queue_position": queue_position,
         "error": row.error_message,
         "created_at": row.created_at,
         "started_at": row.started_at,
@@ -603,24 +669,50 @@ pub async fn cancel_job(
     Path(job_id): Path<String>,
 ) -> Result<StatusCode, AppError> {
     let now = chrono::Utc::now().timestamp();
-    // Atomically transition queued→cancelled or running→cancelled so the
-    // worker can't race past us and mark the row done/failed.
-    let res = sqlx::query(
+    // Atomically transition running→cancelled first, distinguishing it from
+    // queued→cancelled: the worker runs exactly one job at a time, so
+    // ComfyUI's /interrupt targets whatever is currently executing. Calling
+    // it for a merely-queued job would abort a *different*, unrelated job
+    // that's actually running.
+    let running = sqlx::query(
         "UPDATE jobs SET status = 'cancelled', completed_at = ? \
-         WHERE id = ? AND status IN ('queued', 'running')",
+         WHERE id = ? AND status = 'running'",
     )
     .bind(now)
     .bind(&job_id)
     .execute(&state.db)
     .await?;
-    if res.rows_affected() == 0 {
-        return Err(AppError::NotFound);
+
+    let mut was_running = running.rows_affected() == 1;
+    if !was_running {
+        let queued = sqlx::query(
+            "UPDATE jobs SET status = 'cancelled', completed_at = ? \
+             WHERE id = ? AND status = 'queued'",
+        )
+        .bind(now)
+        .bind(&job_id)
+        .execute(&state.db)
+        .await?;
+        if queued.rows_affected() == 0 {
+            // The job may have been claimed queued→running between the two
+            // updates (the only transition out of queued). Retry the running
+            // arm once so that interleaving cancels instead of 404ing.
+            let claimed = sqlx::query(
+                "UPDATE jobs SET status = 'cancelled', completed_at = ? \
+                 WHERE id = ? AND status = 'running'",
+            )
+            .bind(now)
+            .bind(&job_id)
+            .execute(&state.db)
+            .await?;
+            if claimed.rows_affected() == 0 {
+                return Err(AppError::NotFound);
+            }
+            was_running = true;
+        }
     }
-    // Best-effort /interrupt. If the job was queued and never made it to
-    // the GPU, this is a harmless no-op. Either way we've already
-    // transitioned the row, so the worker's downstream mark_failed (which is
-    // gated on status='running') will be a no-op too.
-    if let Err(e) = state.comfy.interrupt().await {
+
+    if was_running && let Err(e) = state.comfy.interrupt().await {
         tracing::warn!(%job_id, error = %e, "comfy /interrupt failed; row already cancelled");
     }
     tracing::info!(target: "audit", event = "job.cancelled", %job_id);

@@ -43,6 +43,17 @@ impl PurgeOpts {
             dry_run: false,
         }
     }
+
+    /// Like [`Self::defaults_now`], with both windows set from config's
+    /// `purge_after_days`.
+    pub fn for_retention_days_now(days: u32) -> Self {
+        let secs = i64::from(days) * 24 * 60 * 60;
+        Self {
+            delete_grace_seconds: secs,
+            cache_ttl_seconds: secs,
+            ..Self::defaults_now()
+        }
+    }
 }
 
 /// Spawn the daily purge task. First tick fires immediately on startup.
@@ -52,7 +63,8 @@ pub fn spawn(state: AppState, mut shutdown: watch::Receiver<bool>) -> tokio::tas
             if *shutdown.borrow() {
                 return;
             }
-            match run(&state, PurgeOpts::defaults_now()).await {
+            let opts = PurgeOpts::for_retention_days_now(state.config.purge_after_days);
+            match run(&state, opts).await {
                 Ok(report) => {
                     if report.jobs_hard_deleted + report.inputs_purged > 0 {
                         tracing::info!(
@@ -96,6 +108,19 @@ pub async fn run(state: &AppState, opts: PurgeOpts) -> anyhow::Result<PurgeRepor
     .await?;
 
     for (id, output_path, thumb_path, preview_path) in stale_jobs {
+        // The DB records only the JPEG derived paths; thumbs/previews also
+        // have an AVIF sibling rendered next to each JPEG (derived_images).
+        // Delete both, or retention leaks .avif files forever.
+        let avif_siblings: Vec<String> = [thumb_path.as_deref(), preview_path.as_deref()]
+            .into_iter()
+            .flatten()
+            .map(|rel| {
+                std::path::Path::new(rel)
+                    .with_extension("avif")
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
         for rel in [
             output_path.as_deref(),
             thumb_path.as_deref(),
@@ -103,6 +128,7 @@ pub async fn run(state: &AppState, opts: PurgeOpts) -> anyhow::Result<PurgeRepor
         ]
         .into_iter()
         .flatten()
+        .chain(avif_siblings.iter().map(String::as_str))
         {
             let abs = state.config.data_dir.join(rel);
             if opts.dry_run {
@@ -160,53 +186,5 @@ pub async fn run(state: &AppState, opts: PurgeOpts) -> anyhow::Result<PurgeRepor
         report.inputs_purged += 1;
     }
 
-    Ok(report)
-}
-
-/// Pool-only entrypoint that skips file IO. Useful for fast tests where no
-/// AppState is handy.
-#[allow(dead_code)]
-pub async fn run_with_pool(
-    pool: &sqlx::SqlitePool,
-    opts: PurgeOpts,
-) -> anyhow::Result<PurgeReport> {
-    // Test-only entrypoint that doesn't need the full AppState; uses pool only.
-    // Files aren't cleaned in this entry — tests for file removal go through
-    // the full `run` with a real AppState.
-    let mut report = PurgeReport::default();
-    let job_cutoff = opts.now_seconds - opts.delete_grace_seconds;
-    let input_cutoff = opts.now_seconds - opts.cache_ttl_seconds;
-
-    let n: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM jobs WHERE deleted_at IS NOT NULL AND deleted_at < ?",
-    )
-    .bind(job_cutoff)
-    .fetch_one(pool)
-    .await?;
-    if !opts.dry_run {
-        sqlx::query("DELETE FROM jobs WHERE deleted_at IS NOT NULL AND deleted_at < ?")
-            .bind(job_cutoff)
-            .execute(pool)
-            .await?;
-    }
-    report.jobs_hard_deleted = n as usize;
-
-    let n: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM inputs i WHERE i.path IS NOT NULL AND i.last_used_at < ? \
-         AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.input_id = i.id AND j.deleted_at IS NULL)",
-    )
-    .bind(input_cutoff)
-    .fetch_one(pool)
-    .await?;
-    if !opts.dry_run {
-        sqlx::query(
-            "UPDATE inputs SET path = NULL WHERE path IS NOT NULL AND last_used_at < ? \
-             AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.input_id = inputs.id AND j.deleted_at IS NULL)",
-        )
-        .bind(input_cutoff)
-        .execute(pool)
-        .await?;
-    }
-    report.inputs_purged = n as usize;
     Ok(report)
 }

@@ -17,6 +17,16 @@ fn authed(uri: &str) -> Request<Body> {
         .unwrap()
 }
 
+fn authed_accept(uri: &str, accept: &str) -> Request<Body> {
+    Request::builder()
+        .method("GET")
+        .uri(uri)
+        .header("authorization", common::bearer(common::TEST_TOKEN))
+        .header("accept", accept)
+        .body(Body::empty())
+        .unwrap()
+}
+
 async fn write_relative(tempdir: &std::path::Path, rel: &str, bytes: &[u8]) {
     let abs = tempdir.join(rel);
     if let Some(parent) = abs.parent() {
@@ -278,6 +288,115 @@ async fn get_preview_lazy_generates_jpeg_and_caches() {
         .await
         .unwrap();
     assert_eq!(preview_path, "previews/preview-job.jpg");
+}
+
+#[tokio::test]
+async fn get_preview_prefers_avif_when_accepted() {
+    let app = common::test_app().await;
+    let png = common::tiny_png(96, 64);
+    let input_id =
+        common::seed_input(&app.db, app._tempdir.path(), &"e".repeat(64), Some(b"x")).await;
+    common::seed_job(
+        &app.db,
+        "avif-preview-job",
+        "done",
+        None,
+        Some("p"),
+        "flux2_klein_edit",
+        input_id,
+        1_700_000_000,
+        Some(1_700_000_030),
+    )
+    .await;
+    let out_rel = "outputs/zun_avif-preview-job_00001_.png";
+    sqlx::query("UPDATE jobs SET output_path = ? WHERE id = ?")
+        .bind(out_rel)
+        .bind("avif-preview-job")
+        .execute(&app.db)
+        .await
+        .unwrap();
+    write_relative(app._tempdir.path(), out_rel, &png).await;
+
+    let resp = app
+        .router
+        .clone()
+        .oneshot(authed_accept(
+            "/api/v1/jobs/avif-preview-job/preview",
+            "image/avif,image/jpeg",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.headers()["content-type"], "image/avif");
+    assert_eq!(resp.headers()["vary"], "Accept");
+    let bytes = resp
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes()
+        .to_vec();
+    assert_eq!(&bytes[4..12], b"ftypavif");
+
+    let cached = app._tempdir.path().join("previews/avif-preview-job.avif");
+    assert!(cached.exists(), "expected preview cached at {cached:?}");
+
+    let (preview_path,): (String,) = sqlx::query_as("SELECT preview_path FROM jobs WHERE id = ?")
+        .bind("avif-preview-job")
+        .fetch_one(&app.db)
+        .await
+        .unwrap();
+    assert_eq!(preview_path, "previews/avif-preview-job.jpg");
+}
+
+#[tokio::test]
+async fn get_preview_uses_jpeg_when_avif_is_not_accepted() {
+    let app = common::test_app().await;
+    let png = common::tiny_png(96, 64);
+    let input_id =
+        common::seed_input(&app.db, app._tempdir.path(), &"f".repeat(64), Some(b"x")).await;
+    common::seed_job(
+        &app.db,
+        "jpeg-preview-job",
+        "done",
+        None,
+        Some("p"),
+        "flux2_klein_edit",
+        input_id,
+        1_700_000_000,
+        Some(1_700_000_030),
+    )
+    .await;
+    let out_rel = "outputs/zun_jpeg-preview-job_00001_.png";
+    sqlx::query("UPDATE jobs SET output_path = ? WHERE id = ?")
+        .bind(out_rel)
+        .bind("jpeg-preview-job")
+        .execute(&app.db)
+        .await
+        .unwrap();
+    write_relative(app._tempdir.path(), out_rel, &png).await;
+
+    let resp = app
+        .router
+        .clone()
+        .oneshot(authed_accept(
+            "/api/v1/jobs/jpeg-preview-job/preview",
+            "image/avif;q=0,image/jpeg",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.headers()["content-type"], "image/jpeg");
+    assert_eq!(resp.headers()["vary"], "Accept");
+
+    let cached = app._tempdir.path().join("previews/jpeg-preview-job.jpg");
+    assert!(cached.exists(), "expected preview cached at {cached:?}");
+    assert!(
+        !app._tempdir
+            .path()
+            .join("previews/jpeg-preview-job.avif")
+            .exists()
+    );
 }
 
 #[tokio::test]

@@ -5,7 +5,6 @@
 use axum::{
     Json,
     extract::{Path, Request, State},
-    http::StatusCode,
     response::Response,
 };
 use serde_json::json;
@@ -71,9 +70,4 @@ pub async fn get_input_file(
         .as_deref()
         .unwrap_or("application/octet-stream");
     images::serve_file_with_ct(&abs, ct, req.headers()).await
-}
-
-#[allow(dead_code)]
-pub fn _no_content() -> StatusCode {
-    StatusCode::NO_CONTENT
 }

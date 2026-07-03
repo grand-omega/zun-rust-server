@@ -50,6 +50,7 @@ async fn main() -> anyhow::Result<()> {
     let backup_handle = backup::spawn(
         state.db.clone(),
         state.config.data_dir.clone(),
+        state.config.backup_keep_days,
         shutdown_rx.clone(),
     );
     // Background tasks run "forever" and their JoinHandles are otherwise

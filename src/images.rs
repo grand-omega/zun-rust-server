@@ -14,7 +14,7 @@ use tokio_util::io::ReaderStream;
 
 use crate::{
     AppError, AppState,
-    derived_images::{self, PREVIEW_MAX_EDGE, THUMB_MAX_EDGE},
+    derived_images::{self, DerivedFormat, PREVIEW_MAX_EDGE, THUMB_MAX_EDGE},
     paths::subdir,
 };
 
@@ -43,7 +43,7 @@ pub async fn get_result(
     serve_file_with_ct(&abs, content_type_for(&rel), req.headers()).await
 }
 
-/// 400px JPEG. Fast path: cached file. Slow path: lazy generation.
+/// 400px derived image. Fast path: cached file. Slow path: lazy generation.
 pub async fn get_thumb(
     state: State<AppState>,
     job_id: Path<String>,
@@ -60,7 +60,7 @@ pub async fn get_thumb(
     .await
 }
 
-/// ~1280px JPEG, sized for full-screen phone viewing. Same lazy-fallback story.
+/// ~1280px derived image, sized for full-screen phone viewing.
 pub async fn get_preview(
     state: State<AppState>,
     job_id: Path<String>,
@@ -90,20 +90,28 @@ async fn serve_derived(
         "SELECT status, output_path, {column} FROM jobs \
          WHERE id = ? AND deleted_at IS NULL"
     );
-    let row: Option<(String, Option<String>, Option<String>)> = sqlx::query_as(&sql)
-        .bind(&job_id)
-        .fetch_optional(&state.db)
-        .await?;
-    let (status, output_path, derived_rel) = row.ok_or(AppError::NotFound)?;
+    let row: Option<(String, Option<String>, Option<String>)> =
+        sqlx::query_as(sqlx::AssertSqlSafe(sql))
+            .bind(&job_id)
+            .fetch_optional(&state.db)
+            .await?;
+    let (status, output_path, mut derived_rel) = row.ok_or(AppError::NotFound)?;
     if status != "done" {
         return Err(AppError::NotReady);
     }
+    let negotiated = negotiate_derived_format(req.headers());
 
     // Fast path: pre-generated file on disk.
-    if let Some(rel) = derived_rel.as_deref() {
-        let abs = state.config.data_dir.join(rel);
+    if let Some(abs) =
+        cached_derived_path(&state.config.data_dir, derived_rel.as_deref(), negotiated)
+        && tokio::fs::metadata(&abs).await.is_ok()
+    {
+        return serve_negotiated_file(&abs, negotiated, req.headers()).await;
+    }
+    if negotiated == DerivedFormat::Avif {
+        let abs = derived_cache_path(&state.config.data_dir, sub, &job_id, negotiated)?;
         if tokio::fs::metadata(&abs).await.is_ok() {
-            return serve_file_with_ct(&abs, "image/jpeg", req.headers()).await;
+            return serve_negotiated_file(&abs, negotiated, req.headers()).await;
         }
     }
 
@@ -113,18 +121,120 @@ async fn serve_derived(
         AppError::Internal(anyhow::anyhow!("done job {job_id} missing output_path"))
     })?;
     let output_abs = state.config.data_dir.join(&output_rel);
-    let abs = derived_images::ensure_one(
+    if negotiated == DerivedFormat::Avif
+        && cached_derived_path(
+            &state.config.data_dir,
+            derived_rel.as_deref(),
+            DerivedFormat::Jpeg,
+        )
+        .is_none_or(|abs| !abs.exists())
+    {
+        let jpeg_abs = derived_images::ensure_one(
+            &state.db,
+            &state.config.data_dir,
+            &job_id,
+            &output_abs,
+            sub,
+            max_edge,
+            DerivedFormat::Jpeg,
+            column,
+        )
+        .await
+        .map_err(AppError::Internal)?;
+        derived_rel = Some(
+            jpeg_abs
+                .strip_prefix(&state.config.data_dir)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| jpeg_abs.to_string_lossy().into_owned()),
+        );
+    }
+    let generated = derived_images::ensure_one(
         &state.db,
         &state.config.data_dir,
         &job_id,
         &output_abs,
         sub,
         max_edge,
+        negotiated,
         column,
     )
-    .await
-    .map_err(AppError::Internal)?;
-    serve_file_with_ct(&abs, "image/jpeg", req.headers()).await
+    .await;
+    let abs = match generated {
+        Ok(abs) => abs,
+        Err(e) if negotiated == DerivedFormat::Avif => {
+            tracing::warn!(job_id, error = %e, "avif lazy generation failed; falling back to jpeg");
+            let Some(abs) = cached_derived_path(
+                &state.config.data_dir,
+                derived_rel.as_deref(),
+                DerivedFormat::Jpeg,
+            ) else {
+                return Err(AppError::Internal(e));
+            };
+            if tokio::fs::metadata(&abs).await.is_err() {
+                return Err(AppError::Internal(e));
+            }
+            return serve_negotiated_file(&abs, DerivedFormat::Jpeg, req.headers()).await;
+        }
+        Err(e) => return Err(AppError::Internal(e)),
+    };
+    serve_negotiated_file(&abs, negotiated, req.headers()).await
+}
+
+fn negotiate_derived_format(headers: &HeaderMap) -> DerivedFormat {
+    let Some(accept) = headers.get(header::ACCEPT).and_then(|v| v.to_str().ok()) else {
+        return DerivedFormat::Jpeg;
+    };
+    if accept.split(',').any(|part| {
+        let part = part.trim().to_ascii_lowercase();
+        let mut sections = part.split(';').map(str::trim);
+        let media = sections.next().unwrap_or_default();
+        let allows = sections.all(|section| {
+            !section.starts_with("q=")
+                || section
+                    .strip_prefix("q=")
+                    .and_then(|q| q.parse::<f32>().ok())
+                    .is_some_and(|q| q > 0.0)
+        });
+        allows && media == "image/avif"
+    }) {
+        DerivedFormat::Avif
+    } else {
+        DerivedFormat::Jpeg
+    }
+}
+
+fn cached_derived_path(
+    data_dir: &FsPath,
+    jpeg_rel: Option<&str>,
+    format: DerivedFormat,
+) -> Option<std::path::PathBuf> {
+    let rel = jpeg_rel?;
+    let abs = data_dir.join(rel);
+    match format {
+        DerivedFormat::Jpeg => Some(abs),
+        DerivedFormat::Avif => Some(abs.with_extension(format.extension())),
+    }
+}
+
+fn derived_cache_path(
+    data_dir: &FsPath,
+    sub: &'static str,
+    job_id: &str,
+    format: DerivedFormat,
+) -> Result<std::path::PathBuf, AppError> {
+    let filename = format!("{}.{}", job_id, format.extension());
+    crate::paths::data_path(data_dir, sub, &filename).map_err(AppError::Internal)
+}
+
+async fn serve_negotiated_file(
+    abs: &FsPath,
+    format: DerivedFormat,
+    req_headers: &HeaderMap,
+) -> Result<Response, AppError> {
+    let mut resp = serve_file_with_ct(abs, format.content_type(), req_headers).await?;
+    resp.headers_mut()
+        .insert(header::VARY, HeaderValue::from_static("Accept"));
+    Ok(resp)
 }
 
 /// Stream a file (configurable content-type), honoring `If-None-Match`

@@ -62,3 +62,13 @@ log_format = "auto"
 #   - No environment variables. The TOML is the only source of truth.
 #   - No XDG / implicit path discovery. You set `data_dir` explicitly.
 #   - No workflow knobs. Workflows are baked into the binary.
+
+# purge_after_days (default 30)
+#   Days before soft-deleted jobs and unused input-cache files are
+#   hard-purged. Matches the app's undo window — don't set it lower
+#   than you want "undo delete" to work.
+# purge_after_days = 30
+
+# backup_keep_days (default 30)
+#   Days of daily database snapshots to keep in <data_dir>/backups/.
+# backup_keep_days = 30
