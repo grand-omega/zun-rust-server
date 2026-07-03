@@ -305,8 +305,14 @@ fn derive_ws_base(base: &str) -> String {
 /// Drain ComfyUI ws frames until the given `prompt_id` terminates. Returns
 /// `Ok(())` on successful completion (`executing` with `node:null`) and
 /// `Err` on `execution_error` or if the stream closes first. Events for
-/// other prompt ids are ignored.
-pub async fn await_completion(ws: &mut ComfyWs, prompt_id: &str) -> anyhow::Result<()> {
+/// other prompt ids are ignored. `progress` fractions (value/max from
+/// ComfyUI `progress` frames, clamped to 0..1) are forwarded to the
+/// optional sender; send errors are ignored (the receiver may be gone).
+pub async fn await_completion(
+    ws: &mut ComfyWs,
+    prompt_id: &str,
+    progress: Option<&tokio::sync::mpsc::UnboundedSender<f32>>,
+) -> anyhow::Result<()> {
     while let Some(frame) = ws.next().await {
         let msg = frame.map_err(|e| anyhow::anyhow!("comfy ws error: {e}"))?;
         let text = match msg {
@@ -322,6 +328,15 @@ pub async fn await_completion(ws: &mut ComfyWs, prompt_id: &str) -> anyhow::Resu
         }
         match v["type"].as_str() {
             Some("executing") if v["data"]["node"].is_null() => return Ok(()),
+            Some("progress") => {
+                if let Some(tx) = progress
+                    && let (Some(value), Some(max)) =
+                        (v["data"]["value"].as_f64(), v["data"]["max"].as_f64())
+                    && max > 0.0
+                {
+                    let _ = tx.send(((value / max).clamp(0.0, 1.0)) as f32);
+                }
+            }
             Some("execution_error") => {
                 let details = v["data"].to_string();
                 anyhow::bail!("comfyui execution_error: {details}");
@@ -619,7 +634,31 @@ mod tests {
         let base = start_ws_server(frames).await;
         let client = ComfyClient::new(&base).unwrap();
         let mut ws = client.connect_ws("test-client").await.unwrap();
-        await_completion(&mut ws, "mine").await.unwrap();
+        await_completion(&mut ws, "mine", None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn await_completion_forwards_progress_fractions() {
+        let frames = vec![
+            // Progress for another prompt — ignored.
+            r#"{"type":"progress","data":{"value":1,"max":10,"prompt_id":"other"}}"#.to_string(),
+            r#"{"type":"progress","data":{"value":5,"max":20,"prompt_id":"mine"}}"#.to_string(),
+            // max=0 — ignored (no division by zero).
+            r#"{"type":"progress","data":{"value":1,"max":0,"prompt_id":"mine"}}"#.to_string(),
+            r#"{"type":"progress","data":{"value":20,"max":20,"prompt_id":"mine"}}"#.to_string(),
+            r#"{"type":"executing","data":{"node":null,"prompt_id":"mine"}}"#.to_string(),
+        ];
+        let base = start_ws_server(frames).await;
+        let client = ComfyClient::new(&base).unwrap();
+        let mut ws = client.connect_ws("test-client").await.unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        await_completion(&mut ws, "mine", Some(&tx)).await.unwrap();
+        drop(tx);
+        let mut got = Vec::new();
+        while let Some(p) = rx.recv().await {
+            got.push(p);
+        }
+        assert_eq!(got, vec![0.25, 1.0]);
     }
 
     #[tokio::test]
@@ -631,7 +670,7 @@ mod tests {
         let base = start_ws_server(frames).await;
         let client = ComfyClient::new(&base).unwrap();
         let mut ws = client.connect_ws("test-client").await.unwrap();
-        let err = await_completion(&mut ws, "mine").await.unwrap_err();
+        let err = await_completion(&mut ws, "mine", None).await.unwrap_err();
         assert!(format!("{err}").contains("execution_error"));
     }
 
@@ -642,7 +681,7 @@ mod tests {
         let base = start_ws_server(frames).await;
         let client = ComfyClient::new(&base).unwrap();
         let mut ws = client.connect_ws("test-client").await.unwrap();
-        let err = await_completion(&mut ws, "mine").await.unwrap_err();
+        let err = await_completion(&mut ws, "mine", None).await.unwrap_err();
         let s = format!("{err}");
         assert!(s.contains("closed") || s.contains("ended"), "got: {s}");
     }

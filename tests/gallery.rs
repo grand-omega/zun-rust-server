@@ -401,3 +401,102 @@ async fn list_requires_auth() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+async fn get_job_reports_queue_position_for_queued_jobs() {
+    let app = common::test_app().await;
+    let input_id =
+        common::seed_input(&app.db, app._tempdir.path(), &"a".repeat(64), Some(b"a")).await;
+    for (id, ts) in [("q1", 100), ("q2", 200), ("q3", 300)] {
+        common::seed_job(
+            &app.db,
+            id,
+            "queued",
+            None,
+            Some("p"),
+            "flux2_klein_edit",
+            input_id,
+            ts,
+            None,
+        )
+        .await;
+    }
+
+    let resp = app
+        .router
+        .clone()
+        .oneshot(authed("GET", "/api/v1/jobs/q1"))
+        .await
+        .unwrap();
+    assert_eq!(body_json(resp).await["queue_position"], 0);
+
+    let resp = app
+        .router
+        .clone()
+        .oneshot(authed("GET", "/api/v1/jobs/q3"))
+        .await
+        .unwrap();
+    let body = body_json(resp).await;
+    assert_eq!(body["queue_position"], 2);
+    assert_eq!(body["progress"], 0.0);
+}
+
+#[tokio::test]
+async fn get_job_queue_position_is_null_for_done_jobs() {
+    let app = common::test_app().await;
+    seed_inputs_and_jobs(&app, &[("d1", 100)]).await;
+
+    let resp = app
+        .router
+        .clone()
+        .oneshot(authed("GET", "/api/v1/jobs/d1"))
+        .await
+        .unwrap();
+    let body = body_json(resp).await;
+    assert!(body["queue_position"].is_null());
+}
+
+#[tokio::test]
+async fn get_job_wait_returns_early_on_status_change() {
+    let app = common::test_app().await;
+    let input_id =
+        common::seed_input(&app.db, app._tempdir.path(), &"a".repeat(64), Some(b"a")).await;
+    common::seed_job(
+        &app.db,
+        "lp1",
+        "queued",
+        None,
+        Some("p"),
+        "flux2_klein_edit",
+        input_id,
+        100,
+        None,
+    )
+    .await;
+
+    // Flip the job to done shortly after the long-poll starts.
+    let db = app.db.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        sqlx::query("UPDATE jobs SET status = 'done', progress = 1.0 WHERE id = 'lp1'")
+            .execute(&db)
+            .await
+            .unwrap();
+    });
+
+    let started = std::time::Instant::now();
+    let resp = app
+        .router
+        .clone()
+        .oneshot(authed("GET", "/api/v1/jobs/lp1?wait=10"))
+        .await
+        .unwrap();
+    let elapsed = started.elapsed();
+    let body = body_json(resp).await;
+    assert_eq!(body["status"], "done");
+    assert_eq!(body["progress"], 1.0);
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "long-poll should return on change, took {elapsed:?}"
+    );
+}

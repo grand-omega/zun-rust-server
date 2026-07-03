@@ -119,7 +119,7 @@ async fn reset_running_jobs(db: &SqlitePool) -> anyhow::Result<()> {
     // Also clear per-attempt state from the prior crashed run so duration
     // math and audit logs reflect the new attempt, not the dead one.
     let result = sqlx::query(
-        "UPDATE jobs SET status = 'queued', started_at = NULL, comfy_prompt_id = NULL, error_message = NULL \
+        "UPDATE jobs SET status = 'queued', started_at = NULL, comfy_prompt_id = NULL, error_message = NULL, progress = 0.0 \
          WHERE status = 'running'",
     )
     .execute(db)
@@ -140,7 +140,7 @@ async fn mark_running(db: &SqlitePool, job_id: &str) -> anyhow::Result<bool> {
     // Also gate on deleted_at: closes the small window between
     // fetch_oldest_queued and here in case the row got soft-deleted in between.
     let res = sqlx::query(
-        "UPDATE jobs SET status = 'running', started_at = ? \
+        "UPDATE jobs SET status = 'running', started_at = ?, progress = 0.0 \
          WHERE id = ? AND status = 'queued' AND deleted_at IS NULL",
     )
     .bind(now)
@@ -176,7 +176,7 @@ async fn mark_done(
     let now = chrono::Utc::now().timestamp();
     let res = sqlx::query(
         "UPDATE jobs SET status = 'done', output_path = ?, completed_at = ?, \
-         width = ?, height = ? WHERE id = ? AND status = 'running'",
+         width = ?, height = ?, progress = 1.0 WHERE id = ? AND status = 'running'",
     )
     .bind(output_path)
     .bind(now)
@@ -273,10 +273,36 @@ async fn process_job(state: &AppState, job: &QueuedJob) -> anyhow::Result<()> {
     update_comfy_prompt_id(&state.db, &job.id, &comfy_prompt_id).await?;
     tracing::info!(job_id = %job.id, comfy_prompt_id = %comfy_prompt_id, "submitted to comfyui");
 
+    // Forward ws progress frames into the jobs row so polling clients see
+    // real percentages. A separate writer task keeps DB latency out of the
+    // ws read loop; writes are throttled to ~2% steps.
+    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<f32>();
+    let progress_db = state.db.clone();
+    let progress_job_id = job.id.clone();
+    let progress_writer = tokio::spawn(async move {
+        let mut last_written = 0.0f32;
+        while let Some(p) = progress_rx.recv().await {
+            if p - last_written >= 0.02 {
+                last_written = p;
+                let _ =
+                    sqlx::query("UPDATE jobs SET progress = ? WHERE id = ? AND status = 'running'")
+                        .bind(p)
+                        .bind(&progress_job_id)
+                        .execute(&progress_db)
+                        .await;
+            }
+        }
+    });
+
     let timeout = Duration::from_secs(timeout_seconds);
-    tokio::time::timeout(timeout, comfy::await_completion(&mut ws, &comfy_prompt_id))
-        .await
-        .map_err(|_| anyhow::anyhow!("comfyui timeout after {timeout_seconds}s"))??;
+    let completion = tokio::time::timeout(
+        timeout,
+        comfy::await_completion(&mut ws, &comfy_prompt_id, Some(&progress_tx)),
+    )
+    .await;
+    drop(progress_tx);
+    let _ = progress_writer.await;
+    completion.map_err(|_| anyhow::anyhow!("comfyui timeout after {timeout_seconds}s"))??;
 
     let entry = state
         .comfy

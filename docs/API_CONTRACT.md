@@ -223,6 +223,7 @@ Query parameters:
       "workflow": "flux2_klein_edit",
       "seed": 1234567890,
       "status": "done",
+      "progress": 1.0,
       "created_at": 1746700000,
       "completed_at": 1746700007,
       "duration_seconds": 7
@@ -237,6 +238,12 @@ pagination is keyset on that pair. `next_cursor` is `null` on the last page.
 
 ### `GET /api/v1/jobs/{id}`
 
+Query parameters:
+- `wait` (optional): long-poll window in seconds, capped at 30. When set,
+  the response is held open until the job's `status` or `progress`
+  changes, or the window elapses (then the current state is returned).
+  Poll with `wait=25` in a loop instead of hammering short GETs.
+
 ```json
 {
   "id": "<uuid>",
@@ -246,6 +253,8 @@ pagination is keyset on that pair. `next_cursor` is `null` on the last page.
   "workflow": "flux2_klein_edit",
   "seed": 1234567890,
   "status": "done",
+  "progress": 1.0,
+  "queue_position": null,
   "error": null,
   "created_at": 1746700000,
   "started_at": 1746700001,
@@ -258,7 +267,9 @@ pagination is keyset on that pair. `next_cursor` is `null` on the last page.
 
 `error` is the failure message when `status == "failed"`. `metadata` is the
 parsed `<output>.json` sidecar emitted alongside the result image; `null` if
-absent or unreadable.
+absent or unreadable. `progress` is 0.0–1.0, parsed live from ComfyUI while
+the job runs (done ⇒ 1.0). `queue_position` is the number of queued jobs the
+worker will pick first — `0` means next up; `null` unless `status == "queued"`.
 
 ### `DELETE /api/v1/jobs/{id}` → `204`
 
