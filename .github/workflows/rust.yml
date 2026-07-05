@@ -20,6 +20,9 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - name: Block forbidden paths (secrets/user data)
+        run: git ls-tree -r --name-only HEAD | ./scripts/check-forbidden-paths.sh
+
       - name: Install Rust toolchain (stable)
         uses: dtolnay/rust-toolchain@stable
         with:
