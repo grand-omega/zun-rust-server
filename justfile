@@ -12,6 +12,13 @@
 default:
     @just --list
 
+# Point git at .githooks/ so pre-commit/pre-push block user data and
+# secrets (images, logs, jobs.db, real config.toml/.env) from ever
+# reaching the remote. Re-run this after a fresh clone.
+install-hooks:
+    git config core.hooksPath .githooks
+    @echo "hooks installed: .githooks/pre-commit, .githooks/pre-push"
+
 # Run the server with ./config.toml (debug build for fast iteration; use
 # `cargo run --release -- --config config.toml` on prod boxes).
 run:
@@ -19,7 +26,7 @@ run:
 
 # Generate config.toml from config.example.toml with a fresh bearer
 # token. Refuses to overwrite — delete config.toml first to regenerate.
-setup:
+setup: install-hooks
     #!/usr/bin/env bash
     set -euo pipefail
     if [[ -f config.toml ]]; then
