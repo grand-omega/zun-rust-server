@@ -1,5 +1,20 @@
 <!--
 Sync Impact Report
+- Version change: 1.0.0 → 1.1.0
+- Modified principles: none (purely additive amendment)
+- Added sections:
+  - Core Principles: VI. No Inspection of Sensitive Job/Log Content
+- Removed sections: none
+- Templates requiring updates:
+  - ✅ .specify/templates/plan-template.md (Constitution Check gate is generic,
+    references this file dynamically — no edit needed)
+  - ✅ .specify/templates/spec-template.md (no constitution-specific references)
+  - ✅ .specify/templates/tasks-template.md (no constitution-specific references)
+  - ✅ CLAUDE.md (no conflicting guidance; left as-is per project convention of
+    not editing files beyond what's requested)
+- Follow-up TODOs: none
+
+Prior report (v1.0.0):
 - Version change: (none) → 1.0.0
 - Modified principles: n/a (initial ratification)
 - Added sections:
@@ -98,6 +113,25 @@ behavior fixed at build time for a single deployment.
 flexibility for a smaller, more auditable surface on a single-operator
 system.
 
+### VI. No Inspection of Sensitive Job/Log Content
+When working in this repository — debugging, testing, or reviewing — the AI
+agent MUST NOT open, print, or otherwise inspect the contents of job
+input/output files, intermediate artifacts, or log entries where doing so
+would reveal a user's prompt text or other user-identifying information.
+Checking file existence, size, path, or non-content metadata is fine;
+payload contents (prompts, generated outputs, raw request/response bodies
+carrying such data) are off-limits, even when troubleshooting a bug directly
+tied to that content. If diagnosing an issue seems to require reading such
+content, the agent MUST stop and ask the user instead of reading it
+directly.
+
+**Rationale**: This is a single-user system handling one real person's
+generative-AI job data (see Principle I). Treating job payloads and logs as
+freely inspectable debug artifacts would normalize a leak vector — the risk
+is not the trusted current user, but agent-assisted work (pasted terminal
+output, shared logs, future context) becoming the path by which prompt or
+personal data escapes.
+
 ## Technology Constraints
 
 - Language/toolchain: Rust stable via `rustup`, edition 2024.
@@ -145,4 +179,4 @@ principles before implementation, not after. Complexity that conflicts with
 Principle I or V must be justified explicitly in the change's description,
 not left implicit.
 
-**Version**: 1.0.0 | **Ratified**: 2026-07-03 | **Last Amended**: 2026-07-03
+**Version**: 1.1.0 | **Ratified**: 2026-07-03 | **Last Amended**: 2026-07-05
