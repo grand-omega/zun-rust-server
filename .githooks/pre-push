@@ -19,7 +19,7 @@ while read -r local_ref local_sha remote_ref remote_sha; do
     fi
     [[ -z "$commits" ]] && continue
 
-    files=$(git diff-tree --no-commit-id --name-only -r --root $commits | sort -u)
+    files=$(echo "$commits" | git diff-tree --no-commit-id --name-only -r --root --stdin | sort -u)
     [[ -z "$files" ]] && continue
 
     if ! echo "$files" | ./scripts/check-forbidden-paths.sh; then

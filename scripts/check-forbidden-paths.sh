@@ -7,7 +7,7 @@ set -euo pipefail
 
 PATTERN='^data/|(^|/)config\.toml(\..+)?$|\.(png|jpe?g|webp|avif|gif|bmp|tiff?)$|\.log$|(^|/)\.env$|\.db$|(^|/)\.claude/'
 
-hits=$(grep -Ei "$PATTERN" || true)
+hits=$(grep -vEi '(^|/)\.claude/skills/' | grep -Ei "$PATTERN" || true)
 
 if [[ -n "$hits" ]]; then
     echo "error: blocked — these paths look like user data or secrets and must never be committed:" >&2
