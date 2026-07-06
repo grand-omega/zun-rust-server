@@ -257,6 +257,51 @@ async fn submit_prompt_text_with_workflow_works() {
 }
 
 #[tokio::test]
+async fn submit_over_max_upload_bytes_returns_413() {
+    // Regression test for SEC-011: DefaultBodyLimit::max(MAX_UPLOAD_BYTES)
+    // in lib.rs (20 MiB) must actually be wired to this route, not just
+    // declared.
+    let mut app = common::test_app().await;
+    let prompt_id = seed_test_prompt(&mut app).await;
+    let oversized = vec![0u8; 20 * 1024 * 1024 + 1];
+    let (ct, body) =
+        common::multipart_submit(&oversized, "image/jpeg", Some(prompt_id), None, None);
+    let resp = app.router.oneshot(submit_request(&ct, body)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+#[tokio::test]
+async fn submit_with_non_image_bytes_is_accepted_with_null_dimensions() {
+    // Regression test for SEC-011: garbage bytes labeled image/jpeg must
+    // not panic or 500 — the dimension probe in resolve_input is
+    // best-effort and non-fatal, so the job is still accepted with
+    // width/height left NULL.
+    let mut app = common::test_app().await;
+    let prompt_id = seed_test_prompt(&mut app).await;
+    let garbage = b"this is not an image, just garbage bytes with an image/jpeg label";
+    let (ct, body) = common::multipart_submit(garbage, "image/jpeg", Some(prompt_id), None, None);
+
+    let resp = app
+        .router
+        .clone()
+        .oneshot(submit_request(&ct, body))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    let created = body_json(resp).await;
+    let job_id = created["job_id"].as_str().unwrap().to_string();
+
+    let resp = app
+        .router
+        .oneshot(authed_get(&format!("/api/v1/jobs/{job_id}")))
+        .await
+        .unwrap();
+    let status = body_json(resp).await;
+    assert!(status["width"].is_null());
+    assert!(status["height"].is_null());
+}
+
+#[tokio::test]
 async fn get_unknown_job_is_404() {
     let app = common::test_app().await;
     let resp = app

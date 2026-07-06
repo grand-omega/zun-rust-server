@@ -16,9 +16,11 @@ Plain HTTP behind a TLS-terminating reverse proxy; bearer-token auth.
   { "error": "<message>", "code": "<machine_code>" }
   ```
   Codes: `unauthorized` (401), `not_found` (404), `bad_request` (400),
-  `not_ready` (409), `need_upload` (409), `internal` (500).
+  `payload_too_large` (413), `not_ready` (409), `need_upload` (409),
+  `internal` (500).
   `need_upload` carries extra fields — see POST `/jobs`.
-- **Limits**: multipart upload ≤ 20 MiB; `prompt_text` ≤ 8 KiB; per-request
+- **Limits**: multipart upload ≤ 20 MiB (over the limit returns 413
+  `payload_too_large`, not 400); `prompt_text` ≤ 8 KiB; per-request
   timeout 120 s.
 
 ---

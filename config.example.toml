@@ -29,7 +29,7 @@ log_format = "auto"
 #
 # token
 #   Secret your Android client sends as `Authorization: Bearer <token>`.
-#   Required, at least 16 chars. Generate with: openssl rand -hex 32.
+#   Required, at least 32 chars. Generate with: openssl rand -hex 32.
 #   Without this, anyone hitting the port could control the server.
 #
 # bind

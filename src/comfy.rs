@@ -47,6 +47,12 @@ pub struct ComfyClient {
 const MAX_ATTEMPTS: u32 = 3;
 /// Base backoff applied as `BASE << (attempt - 1)` between retries.
 const BASE_BACKOFF: Duration = Duration::from_millis(500);
+/// How long to wait for the WebSocket TCP connect + upgrade handshake
+/// before giving up. Matches the health-check client's timeout — without
+/// this, a wedged backend that accepts the TCP connection but never
+/// completes the upgrade would stall the worker (which processes one job
+/// at a time) indefinitely.
+const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How aggressively to retry a given call. `submit_prompt` is not safe to
 /// retry after a partially-sent request since ComfyUI may have already
@@ -201,9 +207,19 @@ impl ComfyClient {
     /// on this stream until it's closed. Call before `submit_prompt` so no
     /// events are missed between queueing and executing.
     pub async fn connect_ws(&self, client_id: &str) -> anyhow::Result<ComfyWs> {
-        let url = format!("{}/ws?clientId={client_id}", self.ws_base);
-        let (ws, _resp) = connect_async(&url)
+        self.connect_ws_with_timeout(client_id, WS_CONNECT_TIMEOUT)
             .await
+    }
+
+    async fn connect_ws_with_timeout(
+        &self,
+        client_id: &str,
+        timeout: Duration,
+    ) -> anyhow::Result<ComfyWs> {
+        let url = format!("{}/ws?clientId={client_id}", self.ws_base);
+        let (ws, _resp) = tokio::time::timeout(timeout, connect_async(&url))
+            .await
+            .map_err(|_| anyhow::anyhow!("connect comfy ws {url}: timed out after {timeout:?}"))?
             .map_err(|e| anyhow::anyhow!("connect comfy ws {url}: {e}"))?;
         Ok(ws)
     }
@@ -684,6 +700,25 @@ mod tests {
         let err = await_completion(&mut ws, "mine", None).await.unwrap_err();
         let s = format!("{err}");
         assert!(s.contains("closed") || s.contains("ended"), "got: {s}");
+    }
+
+    #[tokio::test]
+    async fn connect_ws_times_out_if_backend_never_completes_upgrade() {
+        // Simulate a wedged ComfyUI: accept the TCP connection but never
+        // respond to the WS upgrade handshake.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _stream = listener.accept().await.unwrap();
+            std::future::pending::<()>().await
+        });
+
+        let client = ComfyClient::new(format!("http://{addr}")).unwrap();
+        let err = client
+            .connect_ws_with_timeout("test-client", Duration::from_millis(200))
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("timed out"), "got: {err}");
     }
 
     #[test]

@@ -311,8 +311,14 @@ async fn resolve_input(state: &AppState, fields: &SubmitFields) -> Result<i64, A
     }
 
     match (existing, fields.upload.as_ref()) {
-        // Handled above.
-        (Some((_, Some(_))), _) => unreachable!(),
+        // Unreachable by construction: the block above demotes any
+        // `Some(path)` row to `None` once it confirms the path is either
+        // present-on-disk (early `return`) or missing (set to `None`). A
+        // future refactor of that block could violate this invariant, so
+        // fail gracefully with a 500 instead of aborting the process.
+        (Some((_, Some(_))), _) => Err(AppError::Internal(anyhow::anyhow!(
+            "resolve_input: existing row unexpectedly still has a path"
+        ))),
         // Hash-only request, no row OR row with NULL path → caller must re-upload.
         (existing_row, None) => Err(AppError::NeedUpload {
             input_id: existing_row.map(|(id, _)| id),

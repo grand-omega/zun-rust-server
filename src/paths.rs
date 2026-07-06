@@ -52,7 +52,11 @@ pub async fn atomic_copy(src: &Path, dst: &Path) -> std::io::Result<()> {
     tokio::fs::rename(&tmp, dst).await
 }
 
-fn tmp_sibling(path: &Path) -> PathBuf {
+/// Build a randomly-suffixed temp sibling path for `path`, e.g.
+/// `foo.db` -> `foo.db.tmp.a1b2c3d4`. Shared by `atomic_write`/`atomic_copy`
+/// and by callers (like `backup::snapshot_once`) that need to stage a file
+/// via a non-`tokio::fs` write API before renaming it into place.
+pub fn tmp_sibling(path: &Path) -> PathBuf {
     let suffix: u32 = rand::random();
     let mut name = path
         .file_name()

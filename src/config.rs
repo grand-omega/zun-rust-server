@@ -66,8 +66,8 @@ impl Config {
                 "token is still the example placeholder; run `just setup` to generate a real one"
             );
         }
-        if config.token.len() < 16 {
-            anyhow::bail!("token must be at least 16 characters");
+        if config.token.len() < 32 {
+            anyhow::bail!("token must be at least 32 characters");
         }
         let base = path.parent().unwrap_or_else(|| Path::new("."));
         if config.data_dir.is_relative() {
@@ -87,4 +87,35 @@ fn missing_config_message(path: &Path) -> String {
            zun-rust-server --config /path/to/config.toml",
         p = path.display(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_config(dir: &Path, token: &str) -> PathBuf {
+        let path = dir.join("config.toml");
+        std::fs::write(&path, format!("token = \"{token}\"\n")).unwrap();
+        path
+    }
+
+    #[test]
+    fn rejects_token_shorter_than_32_chars() {
+        let dir = tempfile::tempdir().unwrap();
+        // 31 chars — one short of the minimum.
+        let path = write_config(dir.path(), &"a".repeat(31));
+        let err = Config::load(&path).unwrap_err();
+        assert!(
+            err.to_string().contains("at least 32 characters"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn accepts_token_at_32_chars() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_config(dir.path(), &"a".repeat(32));
+        let config = Config::load(&path).unwrap();
+        assert_eq!(config.token.len(), 32);
+    }
 }
