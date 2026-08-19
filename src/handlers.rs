@@ -573,8 +573,11 @@ pub struct GetJobQuery {
 
 /// Longest long-poll window. Keeps well under the global 120s TimeoutLayer.
 const MAX_WAIT_SECONDS: u64 = 30;
-/// DB re-check cadence while a long-poll is held open.
-const WAIT_POLL_INTERVAL: Duration = Duration::from_millis(750);
+/// Safety-net re-check while a long-poll is held open. The `job_events`
+/// signal is the fast path — this only covers a write that forgot to raise
+/// it, so that the long-poll's correctness never depends on every present
+/// and future writer of `jobs.status`/`progress` remembering to.
+const WAIT_FALLBACK_TICK: Duration = Duration::from_secs(1);
 
 pub async fn get_job(
     State(state): State<AppState>,
@@ -589,6 +592,12 @@ pub async fn get_job(
     // Only hold the request for jobs that can still change; waiting on a
     // terminal job would block the full window for nothing.
     if wait_secs > 0 && matches!(row.status.as_str(), "queued" | "running") {
+        // Subscribe *before* the first re-read so a change landing between
+        // the two is not lost. Every writer of job status/progress bumps
+        // this, so the common case wakes immediately rather than on a timer:
+        // with a ~3 s job reporting four progress steps, a 750 ms poll
+        // interval could sit on a change for a quarter of the job's life.
+        let mut events = state.job_events.subscribe();
         let deadline = tokio::time::Instant::now() + Duration::from_secs(wait_secs);
         let initial = (row.status.clone(), row.progress.to_bits());
         loop {
@@ -596,12 +605,11 @@ pub async fn get_job(
             if now >= deadline {
                 break;
             }
-            // Clamp the nap to the deadline instead of sleeping a full
-            // interval past it: the response then lands inside the window the
-            // client asked for, and the last poll happens *at* the deadline
-            // rather than being skipped — a change in the final interval used
-            // to go unreported until the client's next request.
-            tokio::time::sleep_until((now + WAIT_POLL_INTERVAL).min(deadline)).await;
+            // Wake on the signal, or on the fallback tick, whichever comes
+            // first — but never past the deadline, so the response still
+            // lands inside the window the client asked for.
+            let wake_by = (now + WAIT_FALLBACK_TICK).min(deadline);
+            let _ = tokio::time::timeout_at(wake_by, events.changed()).await;
             let current = fetch_job_row(&state.db, &job_id)
                 .await?
                 .ok_or(AppError::NotFound)?;
@@ -667,6 +675,7 @@ pub async fn delete_job(
     if res.rows_affected() == 0 {
         return Err(AppError::NotFound);
     }
+    crate::worker::notify_job_change(&state);
     tracing::info!(target: "audit", event = "job.deleted", %job_id);
     Ok(StatusCode::NO_CONTENT)
 }
@@ -722,6 +731,7 @@ pub async fn cancel_job(
     if was_running && let Err(e) = state.comfy.interrupt().await {
         tracing::warn!(%job_id, error = %e, "comfy /interrupt failed; row already cancelled");
     }
+    crate::worker::notify_job_change(&state);
     tracing::info!(target: "audit", event = "job.cancelled", %job_id);
     Ok(StatusCode::NO_CONTENT)
 }
@@ -740,6 +750,7 @@ pub async fn restore_job(
     if res.rows_affected() == 0 {
         return Err(AppError::NotFound);
     }
+    crate::worker::notify_job_change(&state);
     tracing::info!(target: "audit", event = "job.restored", %job_id);
     Ok(StatusCode::NO_CONTENT)
 }

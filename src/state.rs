@@ -18,6 +18,13 @@ pub struct AppState {
     /// when a new job is inserted. `try_send` is always used — filling
     /// the channel means the worker already has one wake pending.
     pub worker_tx: mpsc::Sender<()>,
+    /// Bumped whenever a job's status or progress changes, so a long-poll
+    /// (`GET /jobs/{id}?wait=`) wakes the moment the worker writes instead
+    /// of rediscovering it on the next timer tick. A plain counter rather
+    /// than per-job channels: a waiter that wakes for someone else's job
+    /// just re-reads its row and goes back to sleep, which is cheaper than
+    /// tracking subscriptions.
+    pub job_events: Arc<tokio::sync::watch::Sender<u64>>,
     /// Cached disk-usage measurement for `/health`. Walking the data dir
     /// is fast on a personal box but we don't want every health probe to
     /// trigger it; cache the result for ~60s.

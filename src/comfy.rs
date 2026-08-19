@@ -60,6 +60,26 @@ const MAX_IMAGE_BYTES: usize = 128 * 1024 * 1024;
 /// at a time) indefinitely.
 const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Marks an error as "ComfyUI was not there", as opposed to "this prompt
+/// failed". The distinction is what keeps a backend restart from taking the
+/// whole queue with it: the worker requeues on this and only fails the job
+/// on everything else.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub struct Unreachable(pub String);
+
+/// Walk an error chain for evidence that ComfyUI simply was not reachable —
+/// either an explicit [`Unreachable`] (the ws path, which has no typed
+/// error to inspect) or a reqwest error that never got a connection.
+pub fn is_unreachable(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause.downcast_ref::<Unreachable>().is_some()
+            || cause
+                .downcast_ref::<reqwest::Error>()
+                .is_some_and(reqwest::Error::is_connect)
+    })
+}
+
 /// How aggressively to retry a given call. `submit_prompt` is not safe to
 /// retry after a partially-sent request since ComfyUI may have already
 /// accepted the prompt and we'd duplicate work; everything else is a pure
@@ -244,10 +264,17 @@ impl ComfyClient {
         timeout: Duration,
     ) -> anyhow::Result<ComfyWs> {
         let url = format!("{}/ws?clientId={client_id}", self.ws_base);
+        // Both arms are `Unreachable`: whether the handshake timed out or was
+        // refused, the backend is unusable for this job right now, and the
+        // job deserves a retry rather than a death certificate.
         let (ws, _resp) = tokio::time::timeout(timeout, connect_async(&url))
             .await
-            .map_err(|_| anyhow::anyhow!("connect comfy ws {url}: timed out after {timeout:?}"))?
-            .map_err(|e| anyhow::anyhow!("connect comfy ws {url}: {e}"))?;
+            .map_err(|_| {
+                anyhow::Error::new(Unreachable(format!(
+                    "connect comfy ws {url}: timed out after {timeout:?}"
+                )))
+            })?
+            .map_err(|e| anyhow::Error::new(Unreachable(format!("connect comfy ws {url}: {e}"))))?;
         Ok(ws)
     }
 
@@ -285,6 +312,17 @@ impl ComfyClient {
             .await?
             .error_for_status()?;
         Ok(())
+    }
+
+    /// Is ComfyUI answering at all? A cheap `/system_stats` probe, bounded
+    /// so a wedged backend cannot stall the caller. Used by the startup
+    /// warm-up to wait for the backend to come up.
+    pub async fn reachable(&self, timeout: Duration) -> bool {
+        let req = self.http.get(format!("{}/system_stats", self.base)).send();
+        matches!(
+            tokio::time::timeout(timeout, req).await,
+            Ok(Ok(resp)) if resp.status().is_success()
+        )
     }
 
     async fn view_once(

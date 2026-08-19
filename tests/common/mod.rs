@@ -51,6 +51,7 @@ pub async fn test_app_with_comfy_and_ws(comfy_url: &str, ws_url: &str) -> TestAp
         workflows: Arc::new(workflow::WorkflowRegistry::empty()),
         comfy,
         worker_tx,
+        job_events: Arc::new(watch::channel(0u64).0),
         disk_usage_cache: Arc::new(parking_lot::Mutex::new(None)),
     };
     TestApp {

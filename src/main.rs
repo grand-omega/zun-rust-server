@@ -40,6 +40,7 @@ async fn main() -> anyhow::Result<()> {
         workflows: Arc::new(workflows),
         comfy,
         worker_tx,
+        job_events: Arc::new(watch::channel(0u64).0),
         disk_usage_cache: Arc::new(parking_lot::Mutex::new(None)),
     };
 
@@ -60,6 +61,10 @@ async fn main() -> anyhow::Result<()> {
     // that because the *process* never exits. Supervise each task instead:
     // any exit that wasn't triggered by our own shutdown signal is treated
     // as fatal, so the whole process goes down and systemd restarts it.
+    // Warm-up is best-effort and exits on its own once done, so it is
+    // deliberately not `supervise`d — a normal exit here is not a fault.
+    worker::spawn_warmup(state.clone(), shutdown_rx.clone());
+
     supervise("worker", worker_handle, shutdown_rx.clone());
     supervise("purge", purge_handle, shutdown_rx.clone());
     supervise("backup", backup_handle, shutdown_rx.clone());

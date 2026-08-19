@@ -435,16 +435,25 @@ async fn stored_job_error_is_redacted_like_a_5xx_body() {
     // and any data_dir path in the chain, the exact things AppError strips
     // from a 5xx body. The operator still gets the raw chain in the
     // `job.failed` audit line.
-    let mut app = common::test_app_with_comfy("http://127.0.0.1:1").await;
+    //
+    // Uses a reachable-but-broken backend on purpose: an unreachable one is
+    // now requeued rather than failed, so it would never store a message.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(mock_path("/upload/image"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&server)
+        .await;
+
+    let mut app = common::test_app_with_comfy(&server.uri()).await;
     common::seed_workflow(&mut app, "flux2_klein_edit", minimal_workflow());
-    let prompt_id = common::seed_prompt(&app.db, "T", "p", "flux2_klein_edit").await;
     let input_id =
         common::seed_input(&app.db, app._tempdir.path(), &"e".repeat(64), Some(b"img")).await;
     common::seed_job(
         &app.db,
         "red1",
         "queued",
-        Some(prompt_id),
+        None,
         Some("p"),
         "flux2_klein_edit",
         input_id,
@@ -458,9 +467,58 @@ async fn stored_job_error_is_redacted_like_a_5xx_body() {
     let err = body["error"].as_str().unwrap_or_default();
 
     assert!(err.contains("<url>"), "url should be redacted, got: {err}");
-    assert!(!err.contains("127.0.0.1:1"), "leaked the comfy url: {err}");
+    let host = server.uri().replace("http://", "");
+    assert!(!err.contains(&host), "leaked the comfy url: {err}");
     assert!(
-        err.contains("Connection refused") || err.contains("error sending request"),
+        err.contains("500") || err.to_lowercase().contains("status"),
         "redaction must keep the useful part: {err}"
+    );
+}
+
+#[tokio::test]
+async fn unreachable_backend_requeues_the_job_instead_of_failing_it() {
+    // A ComfyUI restart used to take the whole queue with it: every queued
+    // job got claimed, burned its retries, and was marked `failed` ~1.5 s
+    // apart, with no way to get any of them back. "The backend isn't there"
+    // is not the job's fault, so the row goes back on the queue.
+    let mut app = common::test_app_with_comfy("http://127.0.0.1:1").await;
+    common::seed_workflow(&mut app, "flux2_klein_edit", minimal_workflow());
+    let input_id =
+        common::seed_input(&app.db, app._tempdir.path(), &"f".repeat(64), Some(b"img")).await;
+    for id in ["rq1", "rq2"] {
+        common::seed_job(
+            &app.db,
+            id,
+            "queued",
+            None,
+            Some("p"),
+            "flux2_klein_edit",
+            input_id,
+            100,
+            None,
+        )
+        .await;
+    }
+
+    let _worker = common::spawn_worker(&mut app);
+    // Give the worker time to claim, fail to connect, and put the row back.
+    for _ in 0..30 {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let statuses: Vec<String> = sqlx::query_scalar("SELECT status FROM jobs ORDER BY id")
+            .fetch_all(&app.db)
+            .await
+            .unwrap();
+        assert!(
+            !statuses.iter().any(|s| s == "failed"),
+            "a down backend must not fail queued jobs, got {statuses:?}",
+        );
+    }
+    let statuses: Vec<String> = sqlx::query_scalar("SELECT status FROM jobs ORDER BY id")
+        .fetch_all(&app.db)
+        .await
+        .unwrap();
+    assert!(
+        statuses.iter().all(|s| s == "queued"),
+        "both jobs should still be queued, got {statuses:?}",
     );
 }

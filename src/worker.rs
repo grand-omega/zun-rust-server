@@ -25,6 +25,11 @@ use crate::{
 
 const IDLE_TICK: Duration = Duration::from_secs(30);
 
+/// How long to sit out after finding ComfyUI unreachable, before the worker
+/// looks at the queue again. Long enough that a backend restart passes
+/// quietly, short enough that the queue resumes without operator action.
+const UNREACHABLE_BACKOFF: Duration = Duration::from_secs(10);
+
 /// Spawn the worker on the current tokio runtime. Returns the JoinHandle
 /// mostly for completeness — in production we let it run forever.
 pub fn spawn(
@@ -55,6 +60,26 @@ async fn run(state: AppState, mut wake: mpsc::Receiver<()>, mut shutdown: watch:
                 Ok(Some(job)) => {
                     let job_id = job.id.clone();
                     if let Err(e) = process_job(&state, &job).await {
+                        // "ComfyUI isn't there" is not this job's fault.
+                        // Failing on it meant a backend restart marked every
+                        // queued job `failed` in a few seconds — each one
+                        // burning its retries and dying ~1.5s apart, with no
+                        // way to get them back. Put the row back and wait.
+                        if comfy::is_unreachable(&e) {
+                            tracing::warn!(
+                                target: "audit",
+                                event = "job.requeued_backend_down",
+                                job_id = %job_id,
+                                error = %e,
+                                backoff_s = UNREACHABLE_BACKOFF.as_secs(),
+                            );
+                            if let Err(req_err) = requeue(&state.db, &job_id).await {
+                                tracing::error!(job_id = %job_id, error = ?req_err, "could not requeue job");
+                            }
+                            notify_job_change(&state);
+                            tokio::time::sleep(UNREACHABLE_BACKOFF).await;
+                            break;
+                        }
                         tracing::error!(
                             target: "audit",
                             event = "job.failed",
@@ -74,6 +99,7 @@ async fn run(state: AppState, mut wake: mpsc::Receiver<()>, mut shutdown: watch:
                             tracing::error!(job_id = %job_id, error = ?mark_err, "could not mark job failed");
                         }
                     }
+                    notify_job_change(&state);
                 }
                 Ok(None) => break,
                 Err(e) => {
@@ -95,6 +121,102 @@ async fn run(state: AppState, mut wake: mpsc::Receiver<()>, mut shutdown: watch:
             }
         }
     }
+}
+
+/// How long to keep waiting for ComfyUI to answer before giving up on
+/// warming it. Covers "both units started at boot and ComfyUI is still
+/// importing custom nodes" without hanging around forever if it never comes.
+const WARMUP_WAIT_LIMIT: Duration = Duration::from_secs(300);
+/// Gap between reachability probes while waiting for the backend.
+const WARMUP_PROBE_INTERVAL: Duration = Duration::from_secs(3);
+
+/// Run one throwaway generation so the first *real* job doesn't pay for
+/// loading the model.
+///
+/// Measured on an RTX 4070 Ti Super: the first job after a ComfyUI restart
+/// takes ~20 s because it stages ~4 GB of weights, against ~3 s once they
+/// are resident. That 17 s lands squarely on the user's first tap. This
+/// moves it to boot, where nobody is waiting.
+///
+/// Best-effort throughout: every failure is logged and dropped. A backend
+/// that never comes up, a missing model, a workflow that no longer matches
+/// the template — none of it should stop the server from serving.
+pub fn spawn_warmup(
+    state: AppState,
+    mut shutdown: watch::Receiver<bool>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let deadline = tokio::time::Instant::now() + WARMUP_WAIT_LIMIT;
+        while !state.comfy.reachable(WARMUP_PROBE_INTERVAL).await {
+            if *shutdown.borrow() {
+                return;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                tracing::warn!(
+                    waited_s = WARMUP_WAIT_LIMIT.as_secs(),
+                    "comfyui never became reachable; skipping warm-up",
+                );
+                return;
+            }
+            tokio::select! {
+                _ = tokio::time::sleep(WARMUP_PROBE_INTERVAL) => {}
+                _ = shutdown.changed() => if *shutdown.borrow() { return },
+            }
+        }
+        match warm_once(&state).await {
+            Ok(elapsed_ms) => tracing::info!(
+                target: "audit",
+                event = "warmup.done",
+                elapsed_ms,
+                "comfyui warmed; first real job skips the model load",
+            ),
+            Err(e) => tracing::warn!(error = %e, "comfyui warm-up failed (non-fatal)"),
+        }
+    })
+}
+
+/// Submit one minimal generation through the default workflow and wait for
+/// it to finish. Deliberately uses the same path a real job takes — a
+/// partial workflow would not force the sampler to pull the weights into
+/// VRAM, which is the whole point.
+async fn warm_once(state: &AppState) -> anyhow::Result<u64> {
+    let started = std::time::Instant::now();
+    let template = state
+        .workflows
+        .supported_template(workflow::DEFAULT_WORKFLOW)
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+
+    let stored_name = state
+        .comfy
+        .upload_image(warmup_png()?, "zun_warmup.png")
+        .await?;
+    let patched = workflow::build_edit_workflow(template, "warmup", &stored_name, "warmup", 1);
+
+    let client_id = uuid::Uuid::new_v4().to_string();
+    let mut ws = state.comfy.connect_ws(&client_id).await?;
+    let prompt_id = state.comfy.submit_prompt(&patched, &client_id).await?;
+    tokio::time::timeout(
+        Duration::from_secs(crate::MAX_TIMEOUT_SECONDS as u64),
+        comfy::await_completion(&mut ws, &prompt_id, None),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("warm-up timed out"))??;
+    Ok(started.elapsed().as_millis() as u64)
+}
+
+/// The smallest valid PNG we can feed the workflow's LoadImage node.
+fn warmup_png() -> anyhow::Result<Vec<u8>> {
+    let img = image::RgbImage::from_pixel(64, 64, image::Rgb([128, 128, 128]));
+    let mut buf = Vec::new();
+    image::DynamicImage::ImageRgb8(img)
+        .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)?;
+    Ok(buf)
+}
+
+/// Wake anything blocked in a long-poll. Cheap and lossless: `watch` keeps
+/// only the latest value, and a waiter re-reads the DB before deciding.
+pub(crate) fn notify_job_change(state: &AppState) {
+    state.job_events.send_modify(|n| *n = n.wrapping_add(1));
 }
 
 #[derive(sqlx::FromRow)]
@@ -194,6 +316,20 @@ async fn mark_done(
     Ok(res.rows_affected() == 1)
 }
 
+/// Put a claimed job back on the queue after the backend turned out to be
+/// unreachable. Gated on `status = 'running'` like every other transition,
+/// so a cancel that landed in the meantime wins.
+async fn requeue(db: &SqlitePool, job_id: &str) -> anyhow::Result<()> {
+    sqlx::query(
+        "UPDATE jobs SET status = 'queued', started_at = NULL, comfy_prompt_id = NULL, \
+         progress = 0.0 WHERE id = ? AND status = 'running'",
+    )
+    .bind(job_id)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
 async fn mark_failed(db: &SqlitePool, job_id: &str, error_message: &str) -> anyhow::Result<()> {
     let now = chrono::Utc::now().timestamp();
     // Gated on status='running': if the job was cancelled concurrently,
@@ -225,6 +361,7 @@ async fn process_job(state: &AppState, job: &QueuedJob) -> anyhow::Result<()> {
         );
         return Ok(());
     }
+    notify_job_change(state);
     tracing::info!(
         target: "audit",
         event = "job.running",
@@ -288,6 +425,7 @@ async fn process_job(state: &AppState, job: &QueuedJob) -> anyhow::Result<()> {
     let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<f32>();
     let progress_db = state.db.clone();
     let progress_job_id = job.id.clone();
+    let progress_events = state.job_events.clone();
     let progress_writer = tokio::spawn(async move {
         let mut last_written = 0.0f32;
         while let Some(p) = progress_rx.recv().await {
@@ -301,6 +439,7 @@ async fn process_job(state: &AppState, job: &QueuedJob) -> anyhow::Result<()> {
                         .bind(&progress_job_id)
                         .execute(&progress_db)
                         .await;
+                progress_events.send_modify(|n| *n = n.wrapping_add(1));
             }
         }
     });

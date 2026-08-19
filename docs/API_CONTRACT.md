@@ -247,7 +247,8 @@ Query parameters:
 - `wait` (optional): long-poll window in seconds, capped at 30. When set,
   the response is held open until the job's `status` or `progress`
   changes, or the window elapses (then the current state is returned).
-  The response always lands within the requested window.
+  The response always lands within the requested window, and returns as
+  soon as the worker writes the change rather than on a poll interval.
   Poll with `wait=25` in a loop instead of hammering short GETs.
 
 ```json
