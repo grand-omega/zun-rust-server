@@ -322,3 +322,108 @@ async fn worker_resets_running_jobs_to_queued_on_startup() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
+
+#[tokio::test]
+async fn worker_interrupts_comfy_when_a_job_times_out() {
+    // Our per-job timeout does not stop ComfyUI on its own: the prompt keeps
+    // running and holding the GPU, and the next job silently queues behind it
+    // inside ComfyUI. The worker must interrupt explicitly.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(mock_path("/upload/image"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "name": "in.jpg" })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(mock_path("/prompt"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "prompt_id": "stuck-1" })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(mock_path("/interrupt"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    // A ws that completes the upgrade and then never says anything, so the
+    // job can only end by hitting its timeout.
+    let ws_url = common::start_ws_mock(vec![]).await;
+    let mut app = common::test_app_with_comfy_and_ws(&server.uri(), &ws_url).await;
+    common::seed_workflow(&mut app, "flux2_klein_edit", minimal_workflow());
+
+    let input_id =
+        common::seed_input(&app.db, app._tempdir.path(), &"c".repeat(64), Some(b"img")).await;
+    sqlx::query(
+        "INSERT INTO jobs (id, input_id, source_prompt_id, prompt_text, workflow, \
+         timeout_seconds, seed, status, created_at) \
+         VALUES ('to1', ?, NULL, 'p', 'flux2_klein_edit', 1, 0, 'queued', 100)",
+    )
+    .bind(input_id)
+    .execute(&app.db)
+    .await
+    .unwrap();
+
+    let _worker = common::spawn_worker(&mut app);
+    let body = wait_for_status(&app.router, "to1", "failed", Duration::from_secs(15)).await;
+    assert!(
+        body["error"].as_str().unwrap_or("").contains("timeout"),
+        "expected a timeout error, got: {body}"
+    );
+
+    let interrupts = server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|r| r.url.path() == "/interrupt")
+        .count();
+    assert_eq!(interrupts, 1, "timed-out job must interrupt ComfyUI");
+}
+
+#[tokio::test]
+async fn worker_clamps_a_nonsense_stored_timeout_instead_of_hanging_forever() {
+    // Rows written before `timeout_seconds` was range-checked (or edited
+    // straight in SQLite) can still hold a negative value. Read back as
+    // `-1i64 as u64` that is u64::MAX — a timeout that never fires, on a
+    // worker that runs one job at a time. The read path clamps instead, so
+    // the job fails on its own and the queue keeps moving.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(mock_path("/upload/image"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "name": "in.jpg" })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(mock_path("/prompt"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "prompt_id": "neg-1" })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(mock_path("/interrupt"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    let ws_url = common::start_ws_mock(vec![]).await;
+    let mut app = common::test_app_with_comfy_and_ws(&server.uri(), &ws_url).await;
+    common::seed_workflow(&mut app, "flux2_klein_edit", minimal_workflow());
+
+    let input_id =
+        common::seed_input(&app.db, app._tempdir.path(), &"d".repeat(64), Some(b"img")).await;
+    sqlx::query(
+        "INSERT INTO jobs (id, input_id, source_prompt_id, prompt_text, workflow, \
+         timeout_seconds, seed, status, created_at) \
+         VALUES ('neg1', ?, NULL, 'p', 'flux2_klein_edit', -1, 0, 'queued', 100)",
+    )
+    .bind(input_id)
+    .execute(&app.db)
+    .await
+    .unwrap();
+
+    let _worker = common::spawn_worker(&mut app);
+    let body = wait_for_status(&app.router, "neg1", "failed", Duration::from_secs(15)).await;
+    assert!(
+        body["error"].as_str().unwrap_or("").contains("timeout"),
+        "expected a timeout error, got: {body}"
+    );
+}

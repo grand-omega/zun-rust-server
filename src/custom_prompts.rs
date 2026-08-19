@@ -47,6 +47,28 @@ pub struct UpdatePrompt {
     pub timeout_seconds: Option<Option<i64>>,
 }
 
+fn validate_len(field: &str, value: &str, max: usize) -> Result<(), AppError> {
+    if value.len() > max {
+        return Err(AppError::BadRequest(format!(
+            "{field} must be at most {max} bytes"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_timeout(timeout_seconds: Option<i64>) -> Result<(), AppError> {
+    match timeout_seconds {
+        Some(t) if !(crate::MIN_TIMEOUT_SECONDS..=crate::MAX_TIMEOUT_SECONDS).contains(&t) => {
+            Err(AppError::BadRequest(format!(
+                "timeout_seconds must be between {} and {}",
+                crate::MIN_TIMEOUT_SECONDS,
+                crate::MAX_TIMEOUT_SECONDS
+            )))
+        }
+        _ => Ok(()),
+    }
+}
+
 fn validate_workflow(state: &AppState, workflow: &str) -> Result<(), AppError> {
     state
         .workflows
@@ -64,13 +86,13 @@ pub async fn create(
     if body.text.trim().is_empty() {
         return Err(AppError::BadRequest("text must be non-empty".into()));
     }
-    if body.text.len() > crate::MAX_PROMPT_LEN {
-        return Err(AppError::BadRequest(format!(
-            "text must be at most {} bytes",
-            crate::MAX_PROMPT_LEN
-        )));
+    validate_len("label", &body.label, crate::MAX_LABEL_LEN)?;
+    validate_len("text", &body.text, crate::MAX_PROMPT_LEN)?;
+    if let Some(d) = body.description.as_deref() {
+        validate_len("description", d, crate::MAX_DESCRIPTION_LEN)?;
     }
     validate_workflow(&state, &body.workflow)?;
+    validate_timeout(body.timeout_seconds)?;
 
     let now = chrono::Utc::now().timestamp();
     let res = sqlx::query(
@@ -124,21 +146,20 @@ pub async fn update(
         if label.trim().is_empty() {
             return Err(AppError::BadRequest("label must be non-empty".into()));
         }
+        validate_len("label", &label, crate::MAX_LABEL_LEN)?;
         current.label = label;
     }
     if let Some(desc) = body.description {
+        if let Some(d) = desc.as_deref() {
+            validate_len("description", d, crate::MAX_DESCRIPTION_LEN)?;
+        }
         current.description = desc;
     }
     if let Some(text) = body.text {
         if text.trim().is_empty() {
             return Err(AppError::BadRequest("text must be non-empty".into()));
         }
-        if text.len() > crate::MAX_PROMPT_LEN {
-            return Err(AppError::BadRequest(format!(
-                "text must be at most {} bytes",
-                crate::MAX_PROMPT_LEN
-            )));
-        }
+        validate_len("text", &text, crate::MAX_PROMPT_LEN)?;
         current.text = text;
     }
     if let Some(wf) = body.workflow {
@@ -146,6 +167,7 @@ pub async fn update(
         current.workflow = wf;
     }
     if let Some(t) = body.timeout_seconds {
+        validate_timeout(t)?;
         current.timeout_seconds = t;
     }
 

@@ -97,7 +97,13 @@ The server speaks plain HTTP and assumes a reverse proxy in front terminates TLS
 
 ## Roadmap
 
-- **M8**: systemd unit for autostart on boot
-- **M9**: FLUX.1 Fill / LoRA workflow support, WebSocket progress, nightly cleanup task
+- **M8**: systemd unit for autostart on boot. `deploy/` is the placeholder;
+  `main.rs` already supervises its background tasks on the assumption that
+  something restarts the process when it exits non-zero.
+- **M9**: FLUX.1 Fill / LoRA workflow support. The templates are already
+  vendored under `workflows/`; wiring one up means adding it to
+  `ENABLED_WORKFLOWS` and teaching the worker its extra placeholders.
 
-See `plan/PLAN.md` for the full architecture and milestone breakdown.
+WebSocket progress and the nightly cleanup task, previously listed under M9,
+shipped in v3.0.0 — see `jobs.progress` plus `GET /jobs/{id}?wait=` and
+`src/purge.rs`.

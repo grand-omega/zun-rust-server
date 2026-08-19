@@ -44,6 +44,20 @@ pub async fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     tokio::fs::rename(&tmp, path).await
 }
 
+/// Blocking twin of [`atomic_write`], for callers already inside
+/// `spawn_blocking` (image encoding, say) where the tokio file APIs are the
+/// wrong tool. One implementation of the invariant, two entry points —
+/// `derived_images::render_only` used to carry its own copy.
+pub fn atomic_write_blocking(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp = tmp_sibling(path);
+    std::fs::write(&tmp, bytes)?;
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
+}
+
 /// Copy `src` to `dst` via a temp sibling + rename. Same crash-safety as
 /// `atomic_write`.
 pub async fn atomic_copy(src: &Path, dst: &Path) -> std::io::Result<()> {
@@ -99,6 +113,25 @@ mod tests {
             count += 1;
         }
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn atomic_write_blocking_persists_bytes_and_leaves_no_tmp() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("out.bin");
+        atomic_write_blocking(&target, b"hello").unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"hello");
+        let leftovers = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter(|e| {
+                e.as_ref()
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .contains(".tmp.")
+            })
+            .count();
+        assert_eq!(leftovers, 0);
     }
 
     #[tokio::test]

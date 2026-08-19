@@ -228,10 +228,7 @@ async fn process_job(state: &AppState, job: &QueuedJob) -> anyhow::Result<()> {
     );
 
     let prompt_text = &job.prompt_text;
-    let timeout_seconds = job
-        .timeout_seconds
-        .map(|t| t as u64)
-        .unwrap_or(crate::DEFAULT_TIMEOUT_SECONDS);
+    let timeout_seconds = crate::clamp_timeout_seconds(job.timeout_seconds);
 
     // Read input bytes from the cache by input_id.
     let input_row: Option<(Option<String>,)> =
@@ -304,7 +301,18 @@ async fn process_job(state: &AppState, job: &QueuedJob) -> anyhow::Result<()> {
     .await;
     drop(progress_tx);
     let _ = progress_writer.await;
-    completion.map_err(|_| anyhow::anyhow!("comfyui timeout after {timeout_seconds}s"))??;
+    let Ok(completion) = completion else {
+        // Our timeout expiring does not stop ComfyUI: the prompt keeps
+        // running, holds the GPU, and its output is never collected. The
+        // next job would then queue *inside* ComfyUI behind a prompt this
+        // server has already given up on, so repeated timeouts stack.
+        // Interrupt explicitly, same as `cancel_job` does.
+        if let Err(e) = state.comfy.interrupt().await {
+            tracing::warn!(job_id = %job.id, error = %e, "comfy /interrupt after timeout failed");
+        }
+        anyhow::bail!("comfyui timeout after {timeout_seconds}s");
+    };
+    completion?;
 
     let entry = state
         .comfy

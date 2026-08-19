@@ -313,3 +313,71 @@ async fn get_unknown_job_is_404() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
+
+/// Multipart body whose `input_sha256` is supplied explicitly instead of
+/// being derived from `image_bytes` — for mismatch tests.
+fn multipart_submit_with_sha(
+    image_bytes: &[u8],
+    declared_sha: &str,
+    prompt_id: i64,
+) -> (String, Vec<u8>) {
+    let boundary = "----ZunTestBoundary9XyZ";
+    let mut body: Vec<u8> = Vec::new();
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(
+        b"Content-Disposition: form-data; name=\"image\"; filename=\"t.bin\"\r\n",
+    );
+    body.extend_from_slice(b"Content-Type: image/jpeg\r\n\r\n");
+    body.extend_from_slice(image_bytes);
+    body.extend_from_slice(b"\r\n");
+    for (name, value) in [
+        ("input_sha256", declared_sha.to_string()),
+        ("prompt_id", prompt_id.to_string()),
+    ] {
+        body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+        body.extend_from_slice(
+            format!("Content-Disposition: form-data; name=\"{name}\"\r\n\r\n").as_bytes(),
+        );
+        body.extend_from_slice(value.as_bytes());
+        body.extend_from_slice(b"\r\n");
+    }
+    body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+    (format!("multipart/form-data; boundary={boundary}"), body)
+}
+
+#[tokio::test]
+async fn submit_rejects_hash_mismatch_even_when_the_hash_is_already_cached() {
+    // The hash check used to live only on the write path, so a cache hit
+    // returned the *stored* file and silently ignored the attached bytes:
+    // a client sending (hash of A, bytes of B) got a 202 and a job rendered
+    // from A. The check now runs before the cache lookup.
+    let mut app = common::test_app().await;
+    let prompt_id = seed_test_prompt(&mut app).await;
+
+    let cached_bytes = common::tiny_png(4, 4);
+    let cached_sha = zun_rust_server::hash::sha256_hex(&cached_bytes);
+    common::seed_input(
+        &app.db,
+        app._tempdir.path(),
+        &cached_sha,
+        Some(&cached_bytes),
+    )
+    .await;
+
+    let other_bytes = common::tiny_png(8, 8);
+    assert_ne!(other_bytes, cached_bytes);
+    let (ct, body) = multipart_submit_with_sha(&other_bytes, &cached_sha, prompt_id);
+
+    let resp = app
+        .router
+        .clone()
+        .oneshot(submit_request(&ct, body))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = body_json(resp).await;
+    assert!(
+        body["error"].as_str().unwrap().contains("does not match"),
+        "got: {body}"
+    );
+}

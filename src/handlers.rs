@@ -69,6 +69,14 @@ pub async fn submit_job(
             "input_sha256 must be 64 lowercase hex chars".into(),
         ));
     }
+    if let Some(name) = fields.input_name.as_deref()
+        && name.len() > crate::MAX_INPUT_NAME_LEN
+    {
+        return Err(AppError::BadRequest(format!(
+            "input_name must be at most {} bytes",
+            crate::MAX_INPUT_NAME_LEN
+        )));
+    }
 
     let (resolved_workflow, resolved_prompt_text, source_prompt_id, prompt_timeout_seconds) =
         resolve_prompt(&state, &fields).await?;
@@ -240,9 +248,7 @@ async fn resolve_prompt(
                 workflow,
                 text,
                 Some(pid),
-                timeout
-                    .map(|t| t as u64)
-                    .unwrap_or(crate::DEFAULT_TIMEOUT_SECONDS),
+                crate::clamp_timeout_seconds(timeout),
             ))
         }
         (None, Some(text)) => {
@@ -275,6 +281,21 @@ async fn resolve_prompt(
 /// Cache-or-upload flow for the input. Returns the resolved input_id.
 async fn resolve_input(state: &AppState, fields: &SubmitFields) -> Result<i64, AppError> {
     let now = chrono::Utc::now().timestamp();
+
+    // Verify the bytes match the claimed hash *before* consulting the cache.
+    // A cache hit serves the stored file and ignores the attached bytes, so
+    // checking only on the write path let a client with a mismatched
+    // (hash, bytes) pair silently run the job against a different image
+    // than the one it uploaded. Dedup correctness depends on this too.
+    if let Some(upload) = fields.upload.as_ref() {
+        let actual = sha256_hex(&upload.bytes);
+        if actual != fields.input_sha256 {
+            return Err(AppError::BadRequest(format!(
+                "image bytes hash {actual} does not match input_sha256 {}",
+                fields.input_sha256
+            )));
+        }
+    }
 
     // Look for an existing row for this sha.
     let mut existing: Option<(i64, Option<String>)> =
@@ -325,16 +346,8 @@ async fn resolve_input(state: &AppState, fields: &SubmitFields) -> Result<i64, A
         }),
         // Multipart with bytes; either no row, or row with NULL path → write.
         (existing_row, Some(upload)) => {
-            // Verify the bytes match the claimed hash. Cheap insurance —
-            // dedup correctness depends on it.
-            let actual = sha256_hex(&upload.bytes);
-            if actual != fields.input_sha256 {
-                return Err(AppError::BadRequest(format!(
-                    "image bytes hash {actual} does not match input_sha256 {}",
-                    fields.input_sha256
-                )));
-            }
-            // Write the file under <cache>/<sha256>.<ext>.
+            // Write the file under <cache>/<sha256>.<ext>. The bytes were
+            // already checked against `input_sha256` at the top of this fn.
             let filename = format!("{}.{}", fields.input_sha256, upload.ext);
             let abs = paths::data_path(&state.config.data_dir, subdir::CACHE_INPUTS, &filename)?;
             if let Some(parent) = abs.parent() {
@@ -535,7 +548,6 @@ struct JobFullRow {
     completed_at: Option<i64>,
     width: Option<i64>,
     height: Option<i64>,
-    output_path: Option<String>,
 }
 
 async fn fetch_job_row(
@@ -544,7 +556,7 @@ async fn fetch_job_row(
 ) -> Result<Option<JobFullRow>, AppError> {
     Ok(sqlx::query_as(
         "SELECT id, input_id, source_prompt_id, prompt_text, workflow, seed, status, progress, \
-         error_message, created_at, started_at, completed_at, width, height, output_path \
+         error_message, created_at, started_at, completed_at, width, height \
          FROM jobs WHERE id = ? AND deleted_at IS NULL",
     )
     .bind(job_id)
@@ -580,10 +592,16 @@ pub async fn get_job(
         let deadline = tokio::time::Instant::now() + Duration::from_secs(wait_secs);
         let initial = (row.status.clone(), row.progress.to_bits());
         loop {
-            tokio::time::sleep(WAIT_POLL_INTERVAL).await;
-            if tokio::time::Instant::now() >= deadline {
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
                 break;
             }
+            // Clamp the nap to the deadline instead of sleeping a full
+            // interval past it: the response then lands inside the window the
+            // client asked for, and the last poll happens *at* the deadline
+            // rather than being skipped — a change in the final interval used
+            // to go unreported until the client's next request.
+            tokio::time::sleep_until((now + WAIT_POLL_INTERVAL).min(deadline)).await;
             let current = fetch_job_row(&state.db, &job_id)
                 .await?
                 .ok_or(AppError::NotFound)?;
@@ -612,8 +630,6 @@ pub async fn get_job(
         None
     };
 
-    let sidecar_metadata = read_output_sidecar_metadata(&state, &row).await;
-
     Ok(Json(json!({
         "id": row.id,
         "input_id": row.input_id,
@@ -630,22 +646,7 @@ pub async fn get_job(
         "completed_at": row.completed_at,
         "width": row.width,
         "height": row.height,
-        "metadata": sidecar_metadata,
     })))
-}
-
-async fn read_output_sidecar_metadata(
-    state: &AppState,
-    row: &JobFullRow,
-) -> Option<serde_json::Value> {
-    let output_path = row.output_path.as_ref()?;
-    let sidecar = state
-        .config
-        .data_dir
-        .join(output_path)
-        .with_extension("json");
-    let raw = tokio::fs::read(&sidecar).await.ok()?;
-    serde_json::from_slice(&raw).ok()
 }
 
 // ---------- DELETE /api/v1/jobs/{id} (soft) + restore --------------------

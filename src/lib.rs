@@ -50,9 +50,36 @@ const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120)
 /// keeps the DB and audit logs from absorbing accidental bulk uploads.
 pub(crate) const MAX_PROMPT_LEN: usize = 8 * 1024;
 
+/// Caps on the remaining free-text fields a client can store. `text` has had
+/// [`MAX_PROMPT_LEN`] from the start; these close the gap for the fields
+/// alongside it, so one handler no longer bounds some of its inputs and not
+/// others.
+pub(crate) const MAX_LABEL_LEN: usize = 200;
+pub(crate) const MAX_DESCRIPTION_LEN: usize = 1000;
+/// `inputs.original_name` — a filename echoed back for display only.
+pub(crate) const MAX_INPUT_NAME_LEN: usize = 255;
+
 /// Default per-job timeout for the ComfyUI poll loop. Overridable per
 /// custom_prompts row via `timeout_seconds`.
 pub const DEFAULT_TIMEOUT_SECONDS: u64 = 60;
+
+/// Accepted range for a per-prompt `timeout_seconds`. Enforced when a
+/// prompt is written, and clamped again when a job is read back — an
+/// out-of-range value is not merely odd, it wedges the server: the worker
+/// runs one job at a time, and a negative value cast to `u64` becomes
+/// `u64::MAX`, i.e. a timeout that never fires and a queue that never moves.
+pub const MIN_TIMEOUT_SECONDS: i64 = 1;
+pub const MAX_TIMEOUT_SECONDS: i64 = 1800;
+
+/// Clamp a stored `timeout_seconds` into the supported range. Applied on the
+/// read path so rows written before the range was enforced (or edited
+/// straight in SQLite) still produce a timeout that actually fires.
+pub fn clamp_timeout_seconds(stored: Option<i64>) -> u64 {
+    match stored {
+        Some(t) => t.clamp(MIN_TIMEOUT_SECONDS, MAX_TIMEOUT_SECONDS) as u64,
+        None => DEFAULT_TIMEOUT_SECONDS,
+    }
+}
 
 pub fn router(state: AppState) -> Router {
     let authed = Router::new()
@@ -97,7 +124,8 @@ pub fn router(state: AppState) -> Router {
     // Health is intentionally unauthenticated so external probes
     // (the reverse proxy's upstream check, monitoring, the Android client
     // before it has a token) can verify reachability without a token.
-    // It exposes only liveness + ComfyUI reachability, no per-job data.
+    // It exposes only process liveness and disk usage, no per-job data
+    // and no ComfyUI probe.
     // If you want to gate it externally, do that in the proxy
     // (e.g. Caddy `@allowed remote_ip 100.64.0.0/10`).
     let app = Router::new()

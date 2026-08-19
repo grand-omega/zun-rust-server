@@ -115,8 +115,7 @@ pub async fn run(state: &AppState, opts: PurgeOpts) -> anyhow::Result<PurgeRepor
             .into_iter()
             .flatten()
             .map(|rel| {
-                std::path::Path::new(rel)
-                    .with_extension("avif")
+                crate::derived_images::avif_sibling(std::path::Path::new(rel))
                     .to_string_lossy()
                     .into_owned()
             })
