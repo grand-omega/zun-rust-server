@@ -16,10 +16,13 @@ Plain HTTP behind a TLS-terminating reverse proxy; bearer-token auth.
   { "error": "<message>", "code": "<machine_code>" }
   ```
   Codes: `unauthorized` (401), `not_found` (404), `bad_request` (400),
-  `not_ready` (409), `need_upload` (409), `internal` (500).
+  `payload_too_large` (413), `not_ready` (409), `need_upload` (409),
+  `internal` (500).
   `need_upload` carries extra fields — see POST `/jobs`.
-- **Limits**: multipart upload ≤ 20 MiB; `prompt_text` ≤ 8 KiB; per-request
-  timeout 120 s.
+- **Limits**: multipart upload ≤ 20 MiB (over the limit returns 413
+  `payload_too_large`, not 400); `prompt_text` and prompt `text` ≤ 8 KiB;
+  `label` ≤ 1000 B; `description` ≤ 4000 B; `input_name` ≤ 255 B;
+  `timeout_seconds` in `1..=1800` (default `120`); per-request timeout 120 s.
 
 ---
 
@@ -102,9 +105,11 @@ Catalog of saved prompt presets. Soft-deleted rows do not appear in any read.
 }
 ```
 
-`label` and `text` must be non-empty after trim; `text` ≤ 8 KiB; `workflow`
-must appear in `/capabilities` with `supported: true`. `timeout_seconds` is
-optional; falls back to `60`.
+`label` and `text` must be non-empty after trim; `text` ≤ 8 KiB, `label`
+≤ 1000 B, `description` ≤ 4000 B; `workflow` must appear in `/capabilities`
+with `supported: true`. `timeout_seconds` is optional and must fall in
+`1..=1800`; omitted, it falls back to `120` (sized for a cold ComfyUI,
+which stages ~4 GB of weights on its first job).
 
 Response: full prompt row (see GET).
 
@@ -242,6 +247,8 @@ Query parameters:
 - `wait` (optional): long-poll window in seconds, capped at 30. When set,
   the response is held open until the job's `status` or `progress`
   changes, or the window elapses (then the current state is returned).
+  The response always lands within the requested window, and returns as
+  soon as the worker writes the change rather than on a poll interval.
   Poll with `wait=25` in a loop instead of hammering short GETs.
 
 ```json
@@ -260,14 +267,12 @@ Query parameters:
   "started_at": 1746700001,
   "completed_at": 1746700008,
   "width": 1024,
-  "height": 1024,
-  "metadata": { /* free-form sidecar from the worker, if present */ }
+  "height": 1024
 }
 ```
 
-`error` is the failure message when `status == "failed"`. `metadata` is the
-parsed `<output>.json` sidecar emitted alongside the result image; `null` if
-absent or unreadable. `progress` is 0.0–1.0, parsed live from ComfyUI while
+`error` is the failure message when `status == "failed"`, with filesystem
+paths and URLs redacted the same way a 5xx body is. `progress` is 0.0–1.0, parsed live from ComfyUI while
 the job runs (done ⇒ 1.0). `queue_position` is the number of queued jobs the
 worker will pick first — `0` means next up; `null` unless `status == "queued"`.
 
@@ -333,7 +338,10 @@ job for this hash will hit `need_upload`.
 ### `GET /api/v1/inputs/{id}/file`
 
 Streams the cached input bytes. `200` / `304` / `404`, same caching headers
-as `/result`. `404` if the file was purged (`available: false`).
+as `/result`. `404` if the file was purged (`available: false`). The response
+content-type is `image/jpeg` or `image/png`, falling back to
+`application/octet-stream` — the value stored at upload time is echoed back
+only through that allowlist.
 
 ---
 

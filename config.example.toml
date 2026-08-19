@@ -29,7 +29,7 @@ log_format = "auto"
 #
 # token
 #   Secret your Android client sends as `Authorization: Bearer <token>`.
-#   Required, at least 16 chars. Generate with: openssl rand -hex 32.
+#   Required, at least 32 chars. Generate with: openssl rand -hex 32.
 #   Without this, anyone hitting the port could control the server.
 #
 # bind
@@ -72,3 +72,34 @@ log_format = "auto"
 # backup_keep_days (default 30)
 #   Days of daily database snapshots to keep in <data_dir>/backups/.
 # backup_keep_days = 30
+
+# warmup_on_start (default false)
+#   Run one throwaway generation at startup so the first real job does
+#   not wait for the model to load. Measured: ~20 s for the first job
+#   after a ComfyUI restart versus ~3 s once the weights are resident.
+#
+#   Off by default because it keeps those weights (~7.5 GiB for FLUX2
+#   klein) pinned from boot rather than loading them on demand. That is
+#   pure win on a card this server owns outright, and a problem on one
+#   it shares — the deployment host's GPU also runs Jellyfin transcodes
+#   and Immich ML.
+#
+#   Turn it on where the GPU is dedicated to this server.
+# warmup_on_start = true
+
+# comfy_data_dir (default: unset)
+#   ComfyUI's own data directory — the one containing input/ and output/.
+#   Set it only when ComfyUI runs on this machine.
+#
+#   Why you probably want it: every job uploads its source image into
+#   ComfyUI's input/ and leaves a second copy of the result in its
+#   output/. ComfyUI prunes neither and offers no delete endpoint, so
+#   without this setting `purge_after_days` bounds only this server's
+#   copies while ComfyUI's grow forever. (Measured on a real box: 23 MB
+#   under data/outputs next to 445 MB of the same images under
+#   ComfyUI/output.)
+#
+#   The daily purge then deletes files from those two directories that
+#   are both named `zun_*` (i.e. written by this server) and older than
+#   purge_after_days. Nothing else there is ever touched.
+# comfy_data_dir = "/home/you/Desktop/grand-omega/zun-flux-pipeline/ComfyUI"

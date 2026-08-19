@@ -43,6 +43,16 @@ impl DerivedFormat {
     }
 }
 
+/// The AVIF rendition that sits next to a JPEG one. Only the JPEG path is
+/// recorded in the DB (`thumb_path`/`preview_path`); its AVIF counterpart is
+/// addressed purely by this filename convention. Every place that resolves or
+/// deletes an AVIF rendition must go through here, so the convention has
+/// exactly one definition — `purge` silently leaked `.avif` files for a while
+/// because it had its own copy of it.
+pub fn avif_sibling(jpeg_path: &std::path::Path) -> PathBuf {
+    jpeg_path.with_extension(DerivedFormat::Avif.extension())
+}
+
 /// Generate both renditions for a job whose output is at `output_abs`. Writes
 /// `thumb_path` and `preview_path` columns on the row. Errors are logged but
 /// not returned — failing to render a thumb must not fail the job.
@@ -178,7 +188,6 @@ pub async fn render_only(
     }
     let abs_for_blocking = abs.clone();
     let output_for_blocking = output_abs.to_path_buf();
-    let tmp = abs.with_extension(format!("{ext}.tmp-{}", uuid::Uuid::new_v4()));
 
     tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
         let img = image::ImageReader::open(&output_for_blocking)?.decode()?;
@@ -200,12 +209,8 @@ pub async fn render_only(
                 rgb.write_with_encoder(encoder)?;
             }
         }
-        std::fs::write(&tmp, &buf)?;
-        // Atomic rename so concurrent readers never see a torn file.
-        if let Err(e) = std::fs::rename(&tmp, &abs_for_blocking) {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(e.into());
-        }
+        // Atomic so concurrent readers never see a torn file.
+        paths::atomic_write_blocking(&abs_for_blocking, &buf)?;
         Ok(())
     })
     .await

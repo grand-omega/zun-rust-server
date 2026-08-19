@@ -54,6 +54,8 @@ section; in short:
 | `comfy_url` | `http://127.0.0.1:8188` | ComfyUI HTTP base |
 | `data_dir` | `./data` | Houses `jobs.db` and `{cache,outputs,thumbs,previews}/` |
 | `log_format` | `auto` | `auto` (pretty on TTY, JSON otherwise), `pretty`, or `json` |
+| `warmup_on_start` | `false` | Load the model at startup instead of on the first job; leave off when the GPU is shared |
+| `comfy_data_dir` | — (unset) | ComfyUI's dir holding `input/`+`output/`; lets the purge task clean up the `zun_*` files this server leaves there |
 
 Workflows are baked into the binary at compile time — there is no
 runtime knob to swap them. To update templates, edit the files under
@@ -97,7 +99,13 @@ The server speaks plain HTTP and assumes a reverse proxy in front terminates TLS
 
 ## Roadmap
 
-- **M8**: systemd unit for autostart on boot
-- **M9**: FLUX.1 Fill / LoRA workflow support, WebSocket progress, nightly cleanup task
+- **M8**: systemd unit for autostart on boot. `deploy/` is the placeholder;
+  `main.rs` already supervises its background tasks on the assumption that
+  something restarts the process when it exits non-zero.
+- **M9**: FLUX.1 Fill / LoRA workflow support. The templates are already
+  vendored under `workflows/`; wiring one up means adding it to
+  `ENABLED_WORKFLOWS` and teaching the worker its extra placeholders.
 
-See `plan/PLAN.md` for the full architecture and milestone breakdown.
+WebSocket progress and the nightly cleanup task, previously listed under M9,
+shipped in v3.0.0 — see `jobs.progress` plus `GET /jobs/{id}?wait=` and
+`src/purge.rs`.

@@ -121,6 +121,11 @@ async fn serve_derived(
         AppError::Internal(anyhow::anyhow!("done job {job_id} missing output_path"))
     })?;
     let output_abs = state.config.data_dir.join(&output_rel);
+    // Generate the JPEG rendition even when the client negotiated AVIF: only
+    // the JPEG path is recorded in `thumb_path`/`preview_path`, and `purge`
+    // reaches every derived file through those columns (plus the AVIF sibling
+    // convention). An AVIF written without its JPEG counterpart would leave
+    // the column NULL and orphan both files on disk forever.
     if negotiated == DerivedFormat::Avif
         && cached_derived_path(
             &state.config.data_dir,
@@ -212,7 +217,7 @@ fn cached_derived_path(
     let abs = data_dir.join(rel);
     match format {
         DerivedFormat::Jpeg => Some(abs),
-        DerivedFormat::Avif => Some(abs.with_extension(format.extension())),
+        DerivedFormat::Avif => Some(derived_images::avif_sibling(&abs)),
     }
 }
 

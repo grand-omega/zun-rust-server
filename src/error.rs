@@ -17,6 +17,9 @@ pub enum AppError {
     #[error("{0}")]
     BadRequest(String),
 
+    #[error("{0}")]
+    PayloadTooLarge(String),
+
     #[error("job not ready yet")]
     NotReady,
 
@@ -35,6 +38,7 @@ impl AppError {
             Self::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized"),
             Self::NotFound => (StatusCode::NOT_FOUND, "not_found"),
             Self::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request"),
+            Self::PayloadTooLarge(_) => (StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large"),
             Self::NotReady => (StatusCode::CONFLICT, "not_ready"),
             Self::NeedUpload { .. } => (StatusCode::CONFLICT, "need_upload"),
             Self::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
@@ -71,7 +75,10 @@ impl IntoResponse for AppError {
 /// Redact filesystem paths (`/foo/...`) and URLs (`http(s)://...`) from a
 /// string. Truncate to a reasonable cap. Hand-rolled — no regex dep — and
 /// good enough for the kinds of errors anyhow chains produce.
-fn redact_internal(s: &str) -> String {
+///
+/// Used for anything an error string can reach the client through: 5xx
+/// bodies here, and `jobs.error_message` at the point the worker stores it.
+pub(crate) fn redact_internal(s: &str) -> String {
     const MAX_LEN: usize = 400;
     // Token-by-token: split on whitespace, replace tokens that start with a
     // known sensitive prefix (after stripping leading punctuation).
@@ -155,7 +162,15 @@ impl From<std::io::Error> for AppError {
 
 impl From<axum::extract::multipart::MultipartError> for AppError {
     fn from(e: axum::extract::multipart::MultipartError) -> Self {
-        Self::BadRequest(format!("invalid multipart: {e}"))
+        // Preserve 413 for a body-size-limit rejection instead of
+        // collapsing every multipart error into 400 — the client needs to
+        // tell "your upload was too big" apart from "your upload was
+        // malformed" (see security-audit.md SEC-013).
+        if e.status() == StatusCode::PAYLOAD_TOO_LARGE {
+            Self::PayloadTooLarge(format!("upload too large: {e}"))
+        } else {
+            Self::BadRequest(format!("invalid multipart: {e}"))
+        }
     }
 }
 

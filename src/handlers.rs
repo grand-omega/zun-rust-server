@@ -69,6 +69,14 @@ pub async fn submit_job(
             "input_sha256 must be 64 lowercase hex chars".into(),
         ));
     }
+    if let Some(name) = fields.input_name.as_deref()
+        && name.len() > crate::MAX_INPUT_NAME_LEN
+    {
+        return Err(AppError::BadRequest(format!(
+            "input_name must be at most {} bytes",
+            crate::MAX_INPUT_NAME_LEN
+        )));
+    }
 
     let (resolved_workflow, resolved_prompt_text, source_prompt_id, prompt_timeout_seconds) =
         resolve_prompt(&state, &fields).await?;
@@ -240,9 +248,7 @@ async fn resolve_prompt(
                 workflow,
                 text,
                 Some(pid),
-                timeout
-                    .map(|t| t as u64)
-                    .unwrap_or(crate::DEFAULT_TIMEOUT_SECONDS),
+                crate::clamp_timeout_seconds(timeout),
             ))
         }
         (None, Some(text)) => {
@@ -275,6 +281,21 @@ async fn resolve_prompt(
 /// Cache-or-upload flow for the input. Returns the resolved input_id.
 async fn resolve_input(state: &AppState, fields: &SubmitFields) -> Result<i64, AppError> {
     let now = chrono::Utc::now().timestamp();
+
+    // Verify the bytes match the claimed hash *before* consulting the cache.
+    // A cache hit serves the stored file and ignores the attached bytes, so
+    // checking only on the write path let a client with a mismatched
+    // (hash, bytes) pair silently run the job against a different image
+    // than the one it uploaded. Dedup correctness depends on this too.
+    if let Some(upload) = fields.upload.as_ref() {
+        let actual = sha256_hex(&upload.bytes);
+        if actual != fields.input_sha256 {
+            return Err(AppError::BadRequest(format!(
+                "image bytes hash {actual} does not match input_sha256 {}",
+                fields.input_sha256
+            )));
+        }
+    }
 
     // Look for an existing row for this sha.
     let mut existing: Option<(i64, Option<String>)> =
@@ -311,24 +332,22 @@ async fn resolve_input(state: &AppState, fields: &SubmitFields) -> Result<i64, A
     }
 
     match (existing, fields.upload.as_ref()) {
-        // Handled above.
-        (Some((_, Some(_))), _) => unreachable!(),
+        // Unreachable by construction: the block above demotes any
+        // `Some(path)` row to `None` once it confirms the path is either
+        // present-on-disk (early `return`) or missing (set to `None`). A
+        // future refactor of that block could violate this invariant, so
+        // fail gracefully with a 500 instead of aborting the process.
+        (Some((_, Some(_))), _) => Err(AppError::Internal(anyhow::anyhow!(
+            "resolve_input: existing row unexpectedly still has a path"
+        ))),
         // Hash-only request, no row OR row with NULL path → caller must re-upload.
         (existing_row, None) => Err(AppError::NeedUpload {
             input_id: existing_row.map(|(id, _)| id),
         }),
         // Multipart with bytes; either no row, or row with NULL path → write.
         (existing_row, Some(upload)) => {
-            // Verify the bytes match the claimed hash. Cheap insurance —
-            // dedup correctness depends on it.
-            let actual = sha256_hex(&upload.bytes);
-            if actual != fields.input_sha256 {
-                return Err(AppError::BadRequest(format!(
-                    "image bytes hash {actual} does not match input_sha256 {}",
-                    fields.input_sha256
-                )));
-            }
-            // Write the file under <cache>/<sha256>.<ext>.
+            // Write the file under <cache>/<sha256>.<ext>. The bytes were
+            // already checked against `input_sha256` at the top of this fn.
             let filename = format!("{}.{}", fields.input_sha256, upload.ext);
             let abs = paths::data_path(&state.config.data_dir, subdir::CACHE_INPUTS, &filename)?;
             if let Some(parent) = abs.parent() {
@@ -529,7 +548,6 @@ struct JobFullRow {
     completed_at: Option<i64>,
     width: Option<i64>,
     height: Option<i64>,
-    output_path: Option<String>,
 }
 
 async fn fetch_job_row(
@@ -538,7 +556,7 @@ async fn fetch_job_row(
 ) -> Result<Option<JobFullRow>, AppError> {
     Ok(sqlx::query_as(
         "SELECT id, input_id, source_prompt_id, prompt_text, workflow, seed, status, progress, \
-         error_message, created_at, started_at, completed_at, width, height, output_path \
+         error_message, created_at, started_at, completed_at, width, height \
          FROM jobs WHERE id = ? AND deleted_at IS NULL",
     )
     .bind(job_id)
@@ -555,8 +573,11 @@ pub struct GetJobQuery {
 
 /// Longest long-poll window. Keeps well under the global 120s TimeoutLayer.
 const MAX_WAIT_SECONDS: u64 = 30;
-/// DB re-check cadence while a long-poll is held open.
-const WAIT_POLL_INTERVAL: Duration = Duration::from_millis(750);
+/// Safety-net re-check while a long-poll is held open. The `job_events`
+/// signal is the fast path — this only covers a write that forgot to raise
+/// it, so that the long-poll's correctness never depends on every present
+/// and future writer of `jobs.status`/`progress` remembering to.
+const WAIT_FALLBACK_TICK: Duration = Duration::from_secs(1);
 
 pub async fn get_job(
     State(state): State<AppState>,
@@ -571,13 +592,24 @@ pub async fn get_job(
     // Only hold the request for jobs that can still change; waiting on a
     // terminal job would block the full window for nothing.
     if wait_secs > 0 && matches!(row.status.as_str(), "queued" | "running") {
+        // Subscribe *before* the first re-read so a change landing between
+        // the two is not lost. Every writer of job status/progress bumps
+        // this, so the common case wakes immediately rather than on a timer:
+        // with a ~3 s job reporting four progress steps, a 750 ms poll
+        // interval could sit on a change for a quarter of the job's life.
+        let mut events = state.job_events.subscribe();
         let deadline = tokio::time::Instant::now() + Duration::from_secs(wait_secs);
         let initial = (row.status.clone(), row.progress.to_bits());
         loop {
-            tokio::time::sleep(WAIT_POLL_INTERVAL).await;
-            if tokio::time::Instant::now() >= deadline {
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
                 break;
             }
+            // Wake on the signal, or on the fallback tick, whichever comes
+            // first — but never past the deadline, so the response still
+            // lands inside the window the client asked for.
+            let wake_by = (now + WAIT_FALLBACK_TICK).min(deadline);
+            let _ = tokio::time::timeout_at(wake_by, events.changed()).await;
             let current = fetch_job_row(&state.db, &job_id)
                 .await?
                 .ok_or(AppError::NotFound)?;
@@ -606,8 +638,6 @@ pub async fn get_job(
         None
     };
 
-    let sidecar_metadata = read_output_sidecar_metadata(&state, &row).await;
-
     Ok(Json(json!({
         "id": row.id,
         "input_id": row.input_id,
@@ -624,22 +654,7 @@ pub async fn get_job(
         "completed_at": row.completed_at,
         "width": row.width,
         "height": row.height,
-        "metadata": sidecar_metadata,
     })))
-}
-
-async fn read_output_sidecar_metadata(
-    state: &AppState,
-    row: &JobFullRow,
-) -> Option<serde_json::Value> {
-    let output_path = row.output_path.as_ref()?;
-    let sidecar = state
-        .config
-        .data_dir
-        .join(output_path)
-        .with_extension("json");
-    let raw = tokio::fs::read(&sidecar).await.ok()?;
-    serde_json::from_slice(&raw).ok()
 }
 
 // ---------- DELETE /api/v1/jobs/{id} (soft) + restore --------------------
@@ -660,6 +675,7 @@ pub async fn delete_job(
     if res.rows_affected() == 0 {
         return Err(AppError::NotFound);
     }
+    crate::worker::notify_job_change(&state);
     tracing::info!(target: "audit", event = "job.deleted", %job_id);
     Ok(StatusCode::NO_CONTENT)
 }
@@ -715,6 +731,7 @@ pub async fn cancel_job(
     if was_running && let Err(e) = state.comfy.interrupt().await {
         tracing::warn!(%job_id, error = %e, "comfy /interrupt failed; row already cancelled");
     }
+    crate::worker::notify_job_change(&state);
     tracing::info!(target: "audit", event = "job.cancelled", %job_id);
     Ok(StatusCode::NO_CONTENT)
 }
@@ -733,6 +750,7 @@ pub async fn restore_job(
     if res.rows_affected() == 0 {
         return Err(AppError::NotFound);
     }
+    crate::worker::notify_job_change(&state);
     tracing::info!(target: "audit", event = "job.restored", %job_id);
     Ok(StatusCode::NO_CONTENT)
 }

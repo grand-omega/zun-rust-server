@@ -38,15 +38,47 @@ pub struct ComfyClient {
     /// Client used for job-related traffic; generous 60s timeout since
     /// /upload/image and /view can ship MBs.
     http: Client,
-    /// Dedicated client for `/system_stats` health probes with a short
-    /// timeout so a stuck ComfyUI doesn't stall the monitor loop.
-    health_http: Client,
 }
 
 /// Number of attempts (including the first) for idempotent ComfyUI calls.
 const MAX_ATTEMPTS: u32 = 3;
 /// Base backoff applied as `BASE << (attempt - 1)` between retries.
 const BASE_BACKOFF: Duration = Duration::from_millis(500);
+/// Ceiling on a buffered JSON response body (`/upload/image`, `/prompt`,
+/// `/history`). ComfyUI is operator-configured and therefore trusted, but a
+/// backend bug returning an unbounded body would OOM the only process on the
+/// box — reqwest has no built-in cap, so impose one here.
+const MAX_JSON_BYTES: usize = 8 * 1024 * 1024;
+/// Same ceiling for `/view` image downloads. Generous next to a FLUX2 PNG
+/// (single-digit MB) while still bounded.
+const MAX_IMAGE_BYTES: usize = 128 * 1024 * 1024;
+
+/// How long to wait for the WebSocket TCP connect + upgrade handshake
+/// before giving up. Without this, a wedged backend that accepts the TCP
+/// connection but never
+/// completes the upgrade would stall the worker (which processes one job
+/// at a time) indefinitely.
+const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Marks an error as "ComfyUI was not there", as opposed to "this prompt
+/// failed". The distinction is what keeps a backend restart from taking the
+/// whole queue with it: the worker requeues on this and only fails the job
+/// on everything else.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub struct Unreachable(pub String);
+
+/// Walk an error chain for evidence that ComfyUI simply was not reachable —
+/// either an explicit [`Unreachable`] (the ws path, which has no typed
+/// error to inspect) or a reqwest error that never got a connection.
+pub fn is_unreachable(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause.downcast_ref::<Unreachable>().is_some()
+            || cause
+                .downcast_ref::<reqwest::Error>()
+                .is_some_and(reqwest::Error::is_connect)
+    })
+}
 
 /// How aggressively to retry a given call. `submit_prompt` is not safe to
 /// retry after a partially-sent request since ComfyUI may have already
@@ -105,6 +137,31 @@ where
     }
 }
 
+/// Buffer a response body, aborting once it exceeds `cap`. Replaces
+/// `.bytes()`/`.json()`, neither of which bounds the body it collects.
+async fn read_capped(resp: reqwest::Response, cap: usize, what: &str) -> anyhow::Result<Vec<u8>> {
+    if let Some(len) = resp.content_length()
+        && len > cap as u64
+    {
+        anyhow::bail!("{what}: declared body of {len} bytes exceeds the {cap}-byte cap");
+    }
+    let mut resp = resp;
+    let mut buf: Vec<u8> = Vec::new();
+    while let Some(chunk) = resp.chunk().await? {
+        if buf.len() + chunk.len() > cap {
+            anyhow::bail!("{what}: body exceeded the {cap}-byte cap mid-stream");
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf)
+}
+
+/// `read_capped` + JSON decode, for the endpoints that return JSON.
+async fn json_capped(resp: reqwest::Response, what: &str) -> anyhow::Result<Value> {
+    let bytes = read_capped(resp, MAX_JSON_BYTES, what).await?;
+    serde_json::from_slice(&bytes).map_err(|e| anyhow::anyhow!("{what}: invalid json: {e}"))
+}
+
 impl ComfyClient {
     pub fn new(base: impl Into<String>) -> anyhow::Result<Self> {
         let base = base.into();
@@ -123,12 +180,10 @@ impl ComfyClient {
 
     fn build(base: String, ws_base: String) -> anyhow::Result<Self> {
         let http = Client::builder().timeout(Duration::from_secs(60)).build()?;
-        let health_http = Client::builder().timeout(Duration::from_secs(10)).build()?;
         Ok(Self {
             base,
             ws_base,
             http,
-            health_http,
         })
     }
 
@@ -140,15 +195,14 @@ impl ComfyClient {
             )
             .text("type", "input")
             .text("overwrite", "true");
-        let resp: Value = self
+        let resp = self
             .http
             .post(format!("{}/upload/image", self.base))
             .multipart(form)
             .send()
             .await?
-            .error_for_status()?
-            .json()
-            .await?;
+            .error_for_status()?;
+        let resp = json_capped(resp, "upload_image").await?;
         resp["name"]
             .as_str()
             .map(String::from)
@@ -169,15 +223,14 @@ impl ComfyClient {
         workflow: &Value,
         client_id: &str,
     ) -> anyhow::Result<String> {
-        let resp: Value = self
+        let resp = self
             .http
             .post(format!("{}/prompt", self.base))
             .json(&serde_json::json!({ "prompt": workflow, "client_id": client_id }))
             .send()
             .await?
-            .error_for_status()?
-            .json()
-            .await?;
+            .error_for_status()?;
+        let resp = json_capped(resp, "submit_prompt").await?;
         resp["prompt_id"]
             .as_str()
             .map(String::from)
@@ -201,22 +254,38 @@ impl ComfyClient {
     /// on this stream until it's closed. Call before `submit_prompt` so no
     /// events are missed between queueing and executing.
     pub async fn connect_ws(&self, client_id: &str) -> anyhow::Result<ComfyWs> {
-        let url = format!("{}/ws?clientId={client_id}", self.ws_base);
-        let (ws, _resp) = connect_async(&url)
+        self.connect_ws_with_timeout(client_id, WS_CONNECT_TIMEOUT)
             .await
-            .map_err(|e| anyhow::anyhow!("connect comfy ws {url}: {e}"))?;
+    }
+
+    async fn connect_ws_with_timeout(
+        &self,
+        client_id: &str,
+        timeout: Duration,
+    ) -> anyhow::Result<ComfyWs> {
+        let url = format!("{}/ws?clientId={client_id}", self.ws_base);
+        // Both arms are `Unreachable`: whether the handshake timed out or was
+        // refused, the backend is unusable for this job right now, and the
+        // job deserves a retry rather than a death certificate.
+        let (ws, _resp) = tokio::time::timeout(timeout, connect_async(&url))
+            .await
+            .map_err(|_| {
+                anyhow::Error::new(Unreachable(format!(
+                    "connect comfy ws {url}: timed out after {timeout:?}"
+                )))
+            })?
+            .map_err(|e| anyhow::Error::new(Unreachable(format!("connect comfy ws {url}: {e}"))))?;
         Ok(ws)
     }
 
     async fn get_history_once(&self, prompt_id: &str) -> anyhow::Result<Option<HistoryEntry>> {
-        let resp: Value = self
+        let resp = self
             .http
             .get(format!("{}/history/{prompt_id}", self.base))
             .send()
             .await?
-            .error_for_status()?
-            .json()
-            .await?;
+            .error_for_status()?;
+        let resp = json_capped(resp, "get_history").await?;
         match resp.get(prompt_id) {
             Some(entry) => Ok(Some(serde_json::from_value(entry.clone())?)),
             None => Ok(None),
@@ -245,16 +314,15 @@ impl ComfyClient {
         Ok(())
     }
 
-    /// Lightweight liveness probe. Succeeds if ComfyUI answers `/system_stats`
-    /// with a 2xx. Used by the background health monitor. Uses a dedicated
-    /// short-timeout client so a stuck ComfyUI doesn't stall the probe loop.
-    pub async fn health(&self) -> anyhow::Result<()> {
-        self.health_http
-            .get(format!("{}/system_stats", self.base))
-            .send()
-            .await?
-            .error_for_status()?;
-        Ok(())
+    /// Is ComfyUI answering at all? A cheap `/system_stats` probe, bounded
+    /// so a wedged backend cannot stall the caller. Used by the startup
+    /// warm-up to wait for the backend to come up.
+    pub async fn reachable(&self, timeout: Duration) -> bool {
+        let req = self.http.get(format!("{}/system_stats", self.base)).send();
+        matches!(
+            tokio::time::timeout(timeout, req).await,
+            Ok(Ok(resp)) if resp.status().is_success()
+        )
     }
 
     async fn view_once(
@@ -274,7 +342,7 @@ impl ComfyClient {
             .send()
             .await?
             .error_for_status()?;
-        Ok(resp.bytes().await?.to_vec())
+        read_capped(resp, MAX_IMAGE_BYTES, "view").await
     }
 
     /// Download a produced output (image, mask, etc). Bytes are whatever
@@ -414,6 +482,43 @@ mod tests {
     use serde_json::json;
     use wiremock::matchers::{body_string_contains, method, path as mock_path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn read_capped_rejects_a_body_larger_than_the_cap() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(mock_path("/big"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![0u8; 4096]))
+            .mount(&server)
+            .await;
+
+        let client = Client::new();
+        let resp = client
+            .get(format!("{}/big", server.uri()))
+            .send()
+            .await
+            .unwrap();
+        let err = read_capped(resp, 1024, "test").await.unwrap_err();
+        assert!(err.to_string().contains("cap"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn read_capped_returns_a_body_within_the_cap() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(mock_path("/small"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"hello".to_vec()))
+            .mount(&server)
+            .await;
+
+        let client = Client::new();
+        let resp = client
+            .get(format!("{}/small", server.uri()))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(read_capped(resp, 1024, "test").await.unwrap(), b"hello");
+    }
 
     #[tokio::test]
     async fn upload_image_returns_name() {
@@ -684,6 +789,25 @@ mod tests {
         let err = await_completion(&mut ws, "mine", None).await.unwrap_err();
         let s = format!("{err}");
         assert!(s.contains("closed") || s.contains("ended"), "got: {s}");
+    }
+
+    #[tokio::test]
+    async fn connect_ws_times_out_if_backend_never_completes_upgrade() {
+        // Simulate a wedged ComfyUI: accept the TCP connection but never
+        // respond to the WS upgrade handshake.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _stream = listener.accept().await.unwrap();
+            std::future::pending::<()>().await
+        });
+
+        let client = ComfyClient::new(format!("http://{addr}")).unwrap();
+        let err = client
+            .connect_ws_with_timeout("test-client", Duration::from_millis(200))
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("timed out"), "got: {err}");
     }
 
     #[test]

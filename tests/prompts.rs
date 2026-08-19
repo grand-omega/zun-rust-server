@@ -395,3 +395,109 @@ async fn delete_unknown_id_is_404() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn create_rejects_out_of_range_timeout_seconds() {
+    // A negative timeout used to sail through validation, land in the jobs
+    // row, and reach the worker as `-1i64 as u64` == u64::MAX — a timeout
+    // that never fires. The worker runs one job at a time, so that wedged
+    // the whole queue until the process was restarted.
+    let app = app_with_workflow().await;
+    for bad in [-1_i64, 0, 1801] {
+        let resp = app
+            .router
+            .clone()
+            .oneshot(authed_json(
+                "POST",
+                "/api/v1/prompts",
+                json!({
+                    "label": "t",
+                    "text": "x",
+                    "workflow": "flux2_klein_edit",
+                    "timeout_seconds": bad,
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "timeout_seconds={bad} must be rejected"
+        );
+        let body = body_json(resp).await;
+        assert!(
+            body["error"].as_str().unwrap().contains("timeout_seconds"),
+            "got: {body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn update_rejects_out_of_range_timeout_seconds() {
+    let app = app_with_workflow().await;
+    let id = common::seed_prompt(&app.db, "L", "t", "flux2_klein_edit").await;
+    let resp = app
+        .router
+        .clone()
+        .oneshot(authed_json(
+            "PATCH",
+            &format!("/api/v1/prompts/{id}"),
+            json!({ "timeout_seconds": -1 }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn accepts_a_long_chinese_label() {
+    // The caps are byte counts, so CJK costs 3x per character. At the
+    // original 200 B a perfectly ordinary Chinese label (~66 characters)
+    // was rejected — a product constraint that was never intended, on a
+    // server whose user writes Chinese.
+    let app = app_with_workflow().await;
+    let label = "\u{6f2b}\u{753b}\u{98ce}\u{683c}".repeat(50); // 200 chars = 600 bytes
+    assert!(label.len() > 200, "must exceed the old byte cap");
+    let resp = app
+        .router
+        .clone()
+        .oneshot(authed_json(
+            "POST",
+            "/api/v1/prompts",
+            json!({ "label": label, "text": "x", "workflow": "flux2_klein_edit" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::CREATED,
+        "long CJK label must be accepted"
+    );
+}
+
+#[tokio::test]
+async fn create_rejects_oversized_label_and_description() {
+    let app = app_with_workflow().await;
+    for (field, value) in [
+        ("label", "L".repeat(1001)),
+        ("description", "D".repeat(4001)),
+    ] {
+        let mut body = json!({
+            "label": "ok",
+            "text": "x",
+            "workflow": "flux2_klein_edit",
+        });
+        body[field] = json!(value);
+        let resp = app
+            .router
+            .clone()
+            .oneshot(authed_json("POST", "/api/v1/prompts", body))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "oversized {field} must be rejected"
+        );
+    }
+}

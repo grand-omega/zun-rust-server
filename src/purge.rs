@@ -24,6 +24,9 @@ pub struct PurgeReport {
     pub job_files_removed: usize,
     pub inputs_purged: usize,
     pub input_files_removed: usize,
+    /// Stale `zun_*` leftovers removed from ComfyUI's own `input/` and
+    /// `output/` directories, when `comfy_data_dir` is configured.
+    pub comfy_files_removed: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -66,7 +69,9 @@ pub fn spawn(state: AppState, mut shutdown: watch::Receiver<bool>) -> tokio::tas
             let opts = PurgeOpts::for_retention_days_now(state.config.purge_after_days);
             match run(&state, opts).await {
                 Ok(report) => {
-                    if report.jobs_hard_deleted + report.inputs_purged > 0 {
+                    if report.jobs_hard_deleted + report.inputs_purged + report.comfy_files_removed
+                        > 0
+                    {
                         tracing::info!(
                             target: "audit",
                             event = "purge.done",
@@ -74,6 +79,7 @@ pub fn spawn(state: AppState, mut shutdown: watch::Receiver<bool>) -> tokio::tas
                             job_files_removed = report.job_files_removed,
                             inputs_purged = report.inputs_purged,
                             input_files_removed = report.input_files_removed,
+                            comfy_files_removed = report.comfy_files_removed,
                         );
                     }
                 }
@@ -115,8 +121,7 @@ pub async fn run(state: &AppState, opts: PurgeOpts) -> anyhow::Result<PurgeRepor
             .into_iter()
             .flatten()
             .map(|rel| {
-                std::path::Path::new(rel)
-                    .with_extension("avif")
+                crate::derived_images::avif_sibling(std::path::Path::new(rel))
                     .to_string_lossy()
                     .into_owned()
             })
@@ -186,5 +191,78 @@ pub async fn run(state: &AppState, opts: PurgeOpts) -> anyhow::Result<PurgeRepor
         report.inputs_purged += 1;
     }
 
+    if let Some(comfy_dir) = state.config.comfy_data_dir.as_ref() {
+        report.comfy_files_removed = sweep_comfy_leftovers(comfy_dir, &opts).await;
+    }
+
     Ok(report)
+}
+
+/// Prefix every file this server puts into ComfyUI's directories carries.
+/// The sweep below refuses to touch anything without it.
+const COMFY_FILE_PREFIX: &str = "zun_";
+
+/// Delete stale `zun_*` files from ComfyUI's `input/` and `output/`.
+///
+/// ComfyUI keeps both directories forever and offers no delete endpoint, so
+/// without this every job leaves an uploaded input plus a duplicate of its
+/// output there permanently — the server's own retention window governed
+/// only its copies, which is how a 23 MB `data/outputs` ended up beside a
+/// 445 MB `ComfyUI/output` holding the same images.
+///
+/// Deliberately conservative, because this is someone else's directory:
+/// opt-in via config, never recursive, and restricted to files whose name
+/// starts with [`COMFY_FILE_PREFIX`] *and* whose mtime is past the same
+/// retention window the rest of the purge uses. Anything a human or another
+/// tool put in those directories is out of scope by construction.
+async fn sweep_comfy_leftovers(comfy_data_dir: &std::path::Path, opts: &PurgeOpts) -> usize {
+    let mut removed = 0;
+    for sub in ["input", "output"] {
+        let dir = comfy_data_dir.join(sub);
+        let mut entries = match tokio::fs::read_dir(&dir).await {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                tracing::warn!(path = %dir.display(), error = %e, "purge: cannot read comfy dir");
+                continue;
+            }
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            let name = entry.file_name();
+            if !name.to_string_lossy().starts_with(COMFY_FILE_PREFIX) {
+                continue;
+            }
+            let Ok(meta) = entry.metadata().await else {
+                continue;
+            };
+            if !meta.is_file() || !is_older_than_cutoff(&meta, opts) {
+                continue;
+            }
+            if opts.dry_run {
+                removed += 1;
+                continue;
+            }
+            match tokio::fs::remove_file(&path).await {
+                Ok(()) => removed += 1,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    tracing::warn!(path = %path.display(), error = %e, "purge: cannot remove comfy leftover")
+                }
+            }
+        }
+    }
+    removed
+}
+
+/// Is `meta`'s mtime older than the job-retention cutoff? Mtime rather than a
+/// DB timestamp because these files are not tracked in our schema at all.
+fn is_older_than_cutoff(meta: &std::fs::Metadata, opts: &PurgeOpts) -> bool {
+    let Ok(modified) = meta.modified() else {
+        return false;
+    };
+    let Ok(age) = modified.duration_since(std::time::UNIX_EPOCH) else {
+        return false;
+    };
+    (age.as_secs() as i64) < opts.now_seconds - opts.delete_grace_seconds
 }

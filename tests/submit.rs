@@ -257,6 +257,51 @@ async fn submit_prompt_text_with_workflow_works() {
 }
 
 #[tokio::test]
+async fn submit_over_max_upload_bytes_returns_413() {
+    // Regression test for SEC-011: DefaultBodyLimit::max(MAX_UPLOAD_BYTES)
+    // in lib.rs (20 MiB) must actually be wired to this route, not just
+    // declared.
+    let mut app = common::test_app().await;
+    let prompt_id = seed_test_prompt(&mut app).await;
+    let oversized = vec![0u8; 20 * 1024 * 1024 + 1];
+    let (ct, body) =
+        common::multipart_submit(&oversized, "image/jpeg", Some(prompt_id), None, None);
+    let resp = app.router.oneshot(submit_request(&ct, body)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+#[tokio::test]
+async fn submit_with_non_image_bytes_is_accepted_with_null_dimensions() {
+    // Regression test for SEC-011: garbage bytes labeled image/jpeg must
+    // not panic or 500 — the dimension probe in resolve_input is
+    // best-effort and non-fatal, so the job is still accepted with
+    // width/height left NULL.
+    let mut app = common::test_app().await;
+    let prompt_id = seed_test_prompt(&mut app).await;
+    let garbage = b"this is not an image, just garbage bytes with an image/jpeg label";
+    let (ct, body) = common::multipart_submit(garbage, "image/jpeg", Some(prompt_id), None, None);
+
+    let resp = app
+        .router
+        .clone()
+        .oneshot(submit_request(&ct, body))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    let created = body_json(resp).await;
+    let job_id = created["job_id"].as_str().unwrap().to_string();
+
+    let resp = app
+        .router
+        .oneshot(authed_get(&format!("/api/v1/jobs/{job_id}")))
+        .await
+        .unwrap();
+    let status = body_json(resp).await;
+    assert!(status["width"].is_null());
+    assert!(status["height"].is_null());
+}
+
+#[tokio::test]
 async fn get_unknown_job_is_404() {
     let app = common::test_app().await;
     let resp = app
@@ -267,4 +312,72 @@ async fn get_unknown_job_is_404() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+/// Multipart body whose `input_sha256` is supplied explicitly instead of
+/// being derived from `image_bytes` — for mismatch tests.
+fn multipart_submit_with_sha(
+    image_bytes: &[u8],
+    declared_sha: &str,
+    prompt_id: i64,
+) -> (String, Vec<u8>) {
+    let boundary = "----ZunTestBoundary9XyZ";
+    let mut body: Vec<u8> = Vec::new();
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(
+        b"Content-Disposition: form-data; name=\"image\"; filename=\"t.bin\"\r\n",
+    );
+    body.extend_from_slice(b"Content-Type: image/jpeg\r\n\r\n");
+    body.extend_from_slice(image_bytes);
+    body.extend_from_slice(b"\r\n");
+    for (name, value) in [
+        ("input_sha256", declared_sha.to_string()),
+        ("prompt_id", prompt_id.to_string()),
+    ] {
+        body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+        body.extend_from_slice(
+            format!("Content-Disposition: form-data; name=\"{name}\"\r\n\r\n").as_bytes(),
+        );
+        body.extend_from_slice(value.as_bytes());
+        body.extend_from_slice(b"\r\n");
+    }
+    body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+    (format!("multipart/form-data; boundary={boundary}"), body)
+}
+
+#[tokio::test]
+async fn submit_rejects_hash_mismatch_even_when_the_hash_is_already_cached() {
+    // The hash check used to live only on the write path, so a cache hit
+    // returned the *stored* file and silently ignored the attached bytes:
+    // a client sending (hash of A, bytes of B) got a 202 and a job rendered
+    // from A. The check now runs before the cache lookup.
+    let mut app = common::test_app().await;
+    let prompt_id = seed_test_prompt(&mut app).await;
+
+    let cached_bytes = common::tiny_png(4, 4);
+    let cached_sha = zun_rust_server::hash::sha256_hex(&cached_bytes);
+    common::seed_input(
+        &app.db,
+        app._tempdir.path(),
+        &cached_sha,
+        Some(&cached_bytes),
+    )
+    .await;
+
+    let other_bytes = common::tiny_png(8, 8);
+    assert_ne!(other_bytes, cached_bytes);
+    let (ct, body) = multipart_submit_with_sha(&other_bytes, &cached_sha, prompt_id);
+
+    let resp = app
+        .router
+        .clone()
+        .oneshot(submit_request(&ct, body))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = body_json(resp).await;
+    assert!(
+        body["error"].as_str().unwrap().contains("does not match"),
+        "got: {body}"
+    );
 }

@@ -66,8 +66,23 @@ pub async fn get_input_file(
     let (path, content_type) = row.ok_or(AppError::NotFound)?;
     let path = path.ok_or(AppError::NotFound)?; // purged
     let abs = state.config.data_dir.join(&path);
-    let ct = content_type
-        .as_deref()
-        .unwrap_or("application/octet-stream");
-    images::serve_file_with_ct(&abs, ct, req.headers()).await
+    images::serve_file_with_ct(
+        &abs,
+        safe_content_type(content_type.as_deref()),
+        req.headers(),
+    )
+    .await
+}
+
+/// `inputs.content_type` is whatever the client declared in the multipart
+/// part header at upload time. Submit only accepts jpeg/png today, so the
+/// column should never hold anything else — but echo it back only through
+/// this allowlist rather than trusting a stored value to be a safe response
+/// content-type.
+fn safe_content_type(stored: Option<&str>) -> &'static str {
+    match stored {
+        Some("image/jpeg") => "image/jpeg",
+        Some("image/png") => "image/png",
+        _ => "application/octet-stream",
+    }
 }

@@ -520,3 +520,42 @@ async fn get_job_wait_returns_immediately_for_terminal_jobs() {
         "terminal job must not hold the long-poll window, took {elapsed:?}"
     );
 }
+
+#[tokio::test]
+async fn get_job_wait_does_not_overshoot_the_requested_window() {
+    // The poll loop used to `sleep(750ms)` and only then test the deadline,
+    // so a `wait=1` request slept a full extra interval and answered at
+    // ~1.5s — and the poll that would have landed at the deadline was
+    // skipped entirely, hiding any change made in the final interval.
+    let app = common::test_app().await;
+    let input_id =
+        common::seed_input(&app.db, app._tempdir.path(), &"a".repeat(64), Some(b"a")).await;
+    common::seed_job(
+        &app.db,
+        "lpw",
+        "queued",
+        None,
+        Some("p"),
+        "flux2_klein_edit",
+        input_id,
+        100,
+        None,
+    )
+    .await;
+
+    let started = std::time::Instant::now();
+    let resp = app
+        .router
+        .clone()
+        .oneshot(authed("GET", "/api/v1/jobs/lpw?wait=1"))
+        .await
+        .unwrap();
+    let elapsed = started.elapsed();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    assert_eq!(body["status"], "queued");
+    assert!(
+        elapsed < std::time::Duration::from_millis(1_400),
+        "wait=1 must answer within its own window, took {elapsed:?}"
+    );
+}

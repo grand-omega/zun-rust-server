@@ -20,6 +20,32 @@ pub struct Config {
     /// Days of daily database backups to keep in `data/backups/`.
     #[serde(default = "default_retention_days")]
     pub backup_keep_days: u32,
+    /// Run one throwaway generation at startup so the first real job does
+    /// not pay to load the model (~20 s versus ~3 s once resident).
+    ///
+    /// Off by default, because both machines this has run on share their
+    /// GPU with something else: the deployment host's Arc B580 (11.93 GiB)
+    /// also serves Jellyfin transcodes and Immich ML, and warming pins
+    /// ~7.5 GiB from boot instead of releasing it between jobs. The cost of
+    /// forgetting to turn this off there is other services losing the card;
+    /// the cost of forgetting to turn it on is one slow job after a
+    /// restart. The cheaper mistake gets to be the default.
+    ///
+    /// Turn it on where the GPU belongs to this server alone.
+    #[serde(default)]
+    pub warmup_on_start: bool,
+    /// ComfyUI's own data directory (the one holding `input/` and
+    /// `output/`), when it runs on this machine. Optional and unset by
+    /// default.
+    ///
+    /// ComfyUI never prunes those two directories and exposes no HTTP
+    /// endpoint to delete from them, so every job leaves an uploaded input
+    /// and a second copy of its output behind permanently — while
+    /// `purge_after_days` only ever governed this server's own copies. Point
+    /// this at ComfyUI and the purge task cleans up after itself there too,
+    /// touching nothing but the `zun_`-prefixed files it created.
+    #[serde(default)]
+    pub comfy_data_dir: Option<PathBuf>,
 }
 
 fn default_bind() -> String {
@@ -66,12 +92,17 @@ impl Config {
                 "token is still the example placeholder; run `just setup` to generate a real one"
             );
         }
-        if config.token.len() < 16 {
-            anyhow::bail!("token must be at least 16 characters");
+        if config.token.len() < 32 {
+            anyhow::bail!("token must be at least 32 characters");
         }
         let base = path.parent().unwrap_or_else(|| Path::new("."));
         if config.data_dir.is_relative() {
             config.data_dir = base.join(&config.data_dir);
+        }
+        if let Some(dir) = config.comfy_data_dir.as_ref()
+            && dir.is_relative()
+        {
+            config.comfy_data_dir = Some(base.join(dir));
         }
         Ok(config)
     }
@@ -87,4 +118,35 @@ fn missing_config_message(path: &Path) -> String {
            zun-rust-server --config /path/to/config.toml",
         p = path.display(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_config(dir: &Path, token: &str) -> PathBuf {
+        let path = dir.join("config.toml");
+        std::fs::write(&path, format!("token = \"{token}\"\n")).unwrap();
+        path
+    }
+
+    #[test]
+    fn rejects_token_shorter_than_32_chars() {
+        let dir = tempfile::tempdir().unwrap();
+        // 31 chars — one short of the minimum.
+        let path = write_config(dir.path(), &"a".repeat(31));
+        let err = Config::load(&path).unwrap_err();
+        assert!(
+            err.to_string().contains("at least 32 characters"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn accepts_token_at_32_chars() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_config(dir.path(), &"a".repeat(32));
+        let config = Config::load(&path).unwrap();
+        assert_eq!(config.token.len(), 32);
+    }
 }
