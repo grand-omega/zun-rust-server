@@ -62,9 +62,15 @@ async fn run(state: AppState, mut wake: mpsc::Receiver<()>, mut shutdown: watch:
                             error = ?e,
                             "job failed",
                         );
-                        if let Err(mark_err) =
-                            mark_failed(&state.db, &job_id, &format!("{e:#}")).await
-                        {
+                        // The audit line above carries the full, unredacted
+                        // chain for the operator. What gets persisted is what
+                        // the client reads back from `GET /jobs/{id}`, so it
+                        // goes through the same redaction as a 5xx body —
+                        // otherwise a failed job hands the phone the raw
+                        // comfy_url and data_dir paths that `AppError` is
+                        // careful to strip.
+                        let stored = crate::error::redact_internal(&format!("{e:#}"));
+                        if let Err(mark_err) = mark_failed(&state.db, &job_id, &stored).await {
                             tracing::error!(job_id = %job_id, error = ?mark_err, "could not mark job failed");
                         }
                     }

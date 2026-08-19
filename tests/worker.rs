@@ -427,3 +427,40 @@ async fn worker_clamps_a_nonsense_stored_timeout_instead_of_hanging_forever() {
         "expected a timeout error, got: {body}"
     );
 }
+
+#[tokio::test]
+async fn stored_job_error_is_redacted_like_a_5xx_body() {
+    // `GET /jobs/{id}` hands `error` straight to the phone, but it used to
+    // be stored verbatim — so a failed job leaked the configured comfy_url
+    // and any data_dir path in the chain, the exact things AppError strips
+    // from a 5xx body. The operator still gets the raw chain in the
+    // `job.failed` audit line.
+    let mut app = common::test_app_with_comfy("http://127.0.0.1:1").await;
+    common::seed_workflow(&mut app, "flux2_klein_edit", minimal_workflow());
+    let prompt_id = common::seed_prompt(&app.db, "T", "p", "flux2_klein_edit").await;
+    let input_id =
+        common::seed_input(&app.db, app._tempdir.path(), &"e".repeat(64), Some(b"img")).await;
+    common::seed_job(
+        &app.db,
+        "red1",
+        "queued",
+        Some(prompt_id),
+        Some("p"),
+        "flux2_klein_edit",
+        input_id,
+        100,
+        None,
+    )
+    .await;
+
+    let _worker = common::spawn_worker(&mut app);
+    let body = wait_for_status(&app.router, "red1", "failed", Duration::from_secs(30)).await;
+    let err = body["error"].as_str().unwrap_or_default();
+
+    assert!(err.contains("<url>"), "url should be redacted, got: {err}");
+    assert!(!err.contains("127.0.0.1:1"), "leaked the comfy url: {err}");
+    assert!(
+        err.contains("Connection refused") || err.contains("error sending request"),
+        "redaction must keep the useful part: {err}"
+    );
+}

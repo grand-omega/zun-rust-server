@@ -270,7 +270,8 @@ Query parameters:
 }
 ```
 
-`error` is the failure message when `status == "failed"`. `progress` is 0.0–1.0, parsed live from ComfyUI while
+`error` is the failure message when `status == "failed"`, with filesystem
+paths and URLs redacted the same way a 5xx body is. `progress` is 0.0–1.0, parsed live from ComfyUI while
 the job runs (done ⇒ 1.0). `queue_position` is the number of queued jobs the
 worker will pick first — `0` means next up; `null` unless `status == "queued"`.
 

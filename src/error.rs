@@ -75,7 +75,10 @@ impl IntoResponse for AppError {
 /// Redact filesystem paths (`/foo/...`) and URLs (`http(s)://...`) from a
 /// string. Truncate to a reasonable cap. Hand-rolled — no regex dep — and
 /// good enough for the kinds of errors anyhow chains produce.
-fn redact_internal(s: &str) -> String {
+///
+/// Used for anything an error string can reach the client through: 5xx
+/// bodies here, and `jobs.error_message` at the point the worker stores it.
+pub(crate) fn redact_internal(s: &str) -> String {
     const MAX_LEN: usize = 400;
     // Token-by-token: split on whitespace, replace tokens that start with a
     // known sensitive prefix (after stripping leading punctuation).
