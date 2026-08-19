@@ -240,3 +240,83 @@ async fn dry_run_leaves_disk_and_db_untouched() {
         .unwrap();
     assert!(row.is_some(), "dry_run must not delete the row");
 }
+
+/// Write a file into a fake ComfyUI data dir and backdate its mtime.
+fn write_comfy_file(comfy_dir: &std::path::Path, sub: &str, name: &str, age_days: u64) {
+    let abs = comfy_dir.join(sub).join(name);
+    std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+    std::fs::write(&abs, b"x").unwrap();
+    let when = std::time::SystemTime::now() - std::time::Duration::from_secs(age_days * 86400);
+    std::fs::File::options()
+        .write(true)
+        .open(&abs)
+        .unwrap()
+        .set_modified(when)
+        .unwrap();
+}
+
+#[tokio::test]
+async fn purge_sweeps_only_stale_zun_files_from_comfy_dirs() {
+    // ComfyUI never prunes input/ or output/ and has no delete endpoint, so
+    // the purge task cleans up the files this server put there. It must
+    // touch nothing else in those directories.
+    let mut app = common::test_app().await;
+    let comfy = app._tempdir.path().join("comfy");
+    app.state.config.comfy_data_dir = Some(comfy.clone());
+
+    write_comfy_file(&comfy, "input", "zun_abc.jpg", 90); // ours, stale
+    write_comfy_file(&comfy, "output", "zun_abc_00001_.png", 90); // ours, stale
+    write_comfy_file(&comfy, "input", "zun_fresh.jpg", 1); // ours, still recent
+    write_comfy_file(&comfy, "input", "vacation.jpg", 90); // someone else's
+    write_comfy_file(&comfy, "output", "ComfyUI_00042_.png", 90); // someone else's
+
+    let report = purge::run(&app.state, PurgeOpts::for_retention_days_now(30))
+        .await
+        .unwrap();
+    assert_eq!(
+        report.comfy_files_removed, 2,
+        "only the two stale zun_ files"
+    );
+
+    let gone = |sub: &str, n: &str| !comfy.join(sub).join(n).exists();
+    assert!(gone("input", "zun_abc.jpg"));
+    assert!(gone("output", "zun_abc_00001_.png"));
+    assert!(
+        !gone("input", "zun_fresh.jpg"),
+        "inside retention, must stay"
+    );
+    assert!(
+        !gone("input", "vacation.jpg"),
+        "not ours, must never be touched"
+    );
+    assert!(
+        !gone("output", "ComfyUI_00042_.png"),
+        "not ours, must never be touched"
+    );
+}
+
+#[tokio::test]
+async fn purge_leaves_comfy_dirs_alone_when_unconfigured() {
+    let app = common::test_app().await;
+    assert!(app.state.config.comfy_data_dir.is_none(), "off by default");
+    let report = purge::run(&app.state, PurgeOpts::for_retention_days_now(30))
+        .await
+        .unwrap();
+    assert_eq!(report.comfy_files_removed, 0);
+}
+
+#[tokio::test]
+async fn purge_dry_run_counts_comfy_files_without_deleting() {
+    let mut app = common::test_app().await;
+    let comfy = app._tempdir.path().join("comfy");
+    app.state.config.comfy_data_dir = Some(comfy.clone());
+    write_comfy_file(&comfy, "input", "zun_abc.jpg", 90);
+
+    let opts = PurgeOpts {
+        dry_run: true,
+        ..PurgeOpts::for_retention_days_now(30)
+    };
+    let report = purge::run(&app.state, opts).await.unwrap();
+    assert_eq!(report.comfy_files_removed, 1);
+    assert!(comfy.join("input").join("zun_abc.jpg").exists());
+}

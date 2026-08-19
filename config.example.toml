@@ -72,3 +72,20 @@ log_format = "auto"
 # backup_keep_days (default 30)
 #   Days of daily database snapshots to keep in <data_dir>/backups/.
 # backup_keep_days = 30
+
+# comfy_data_dir (default: unset)
+#   ComfyUI's own data directory — the one containing input/ and output/.
+#   Set it only when ComfyUI runs on this machine.
+#
+#   Why you probably want it: every job uploads its source image into
+#   ComfyUI's input/ and leaves a second copy of the result in its
+#   output/. ComfyUI prunes neither and offers no delete endpoint, so
+#   without this setting `purge_after_days` bounds only this server's
+#   copies while ComfyUI's grow forever. (Measured on a real box: 23 MB
+#   under data/outputs next to 445 MB of the same images under
+#   ComfyUI/output.)
+#
+#   The daily purge then deletes files from those two directories that
+#   are both named `zun_*` (i.e. written by this server) and older than
+#   purge_after_days. Nothing else there is ever touched.
+# comfy_data_dir = "/home/you/Desktop/grand-omega/zun-flux-pipeline/ComfyUI"

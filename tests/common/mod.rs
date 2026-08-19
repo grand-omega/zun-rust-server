@@ -40,6 +40,7 @@ pub async fn test_app_with_comfy_and_ws(comfy_url: &str, ws_url: &str) -> TestAp
         log_format: zun_rust_server::config::LogFormat::Auto,
         purge_after_days: 30,
         backup_keep_days: 30,
+        comfy_data_dir: None,
     };
     let comfy = ComfyClient::with_ws_base(comfy_url, ws_url).expect("comfy client");
     let (worker_tx, worker_rx) = mpsc::channel::<()>(1);

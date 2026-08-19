@@ -61,7 +61,14 @@ pub(crate) const MAX_INPUT_NAME_LEN: usize = 255;
 
 /// Default per-job timeout for the ComfyUI poll loop. Overridable per
 /// custom_prompts row via `timeout_seconds`.
-pub const DEFAULT_TIMEOUT_SECONDS: u64 = 60;
+///
+/// Sized for a *cold* ComfyUI, not a warm one. Measured on an RTX 4070 Ti
+/// Super with FLUX2 klein: ~3 s per job once the model is resident, ~20 s
+/// for the first job after a ComfyUI restart (it stages ~4 GB of weights),
+/// and ~105 s for that same first job when something else is holding most
+/// of the VRAM. 60 s covered the warm case and quietly failed the third
+/// one, so the default now leaves room for a cold start under contention.
+pub const DEFAULT_TIMEOUT_SECONDS: u64 = 120;
 
 /// Accepted range for a per-prompt `timeout_seconds`. Enforced when a
 /// prompt is written, and clamped again when a job is read back — an

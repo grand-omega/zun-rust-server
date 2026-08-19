@@ -20,6 +20,18 @@ pub struct Config {
     /// Days of daily database backups to keep in `data/backups/`.
     #[serde(default = "default_retention_days")]
     pub backup_keep_days: u32,
+    /// ComfyUI's own data directory (the one holding `input/` and
+    /// `output/`), when it runs on this machine. Optional and unset by
+    /// default.
+    ///
+    /// ComfyUI never prunes those two directories and exposes no HTTP
+    /// endpoint to delete from them, so every job leaves an uploaded input
+    /// and a second copy of its output behind permanently — while
+    /// `purge_after_days` only ever governed this server's own copies. Point
+    /// this at ComfyUI and the purge task cleans up after itself there too,
+    /// touching nothing but the `zun_`-prefixed files it created.
+    #[serde(default)]
+    pub comfy_data_dir: Option<PathBuf>,
 }
 
 fn default_bind() -> String {
@@ -72,6 +84,11 @@ impl Config {
         let base = path.parent().unwrap_or_else(|| Path::new("."));
         if config.data_dir.is_relative() {
             config.data_dir = base.join(&config.data_dir);
+        }
+        if let Some(dir) = config.comfy_data_dir.as_ref()
+            && dir.is_relative()
+        {
+            config.comfy_data_dir = Some(base.join(dir));
         }
         Ok(config)
     }

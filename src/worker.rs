@@ -231,12 +231,12 @@ async fn process_job(state: &AppState, job: &QueuedJob) -> anyhow::Result<()> {
     let timeout_seconds = crate::clamp_timeout_seconds(job.timeout_seconds);
 
     // Read input bytes from the cache by input_id.
-    let input_row: Option<(Option<String>,)> =
-        sqlx::query_as("SELECT path FROM inputs WHERE id = ?")
+    let input_row: Option<(Option<String>, String)> =
+        sqlx::query_as("SELECT path, sha256 FROM inputs WHERE id = ?")
             .bind(job.input_id)
             .fetch_optional(&state.db)
             .await?;
-    let (input_path,) =
+    let (input_path, input_sha) =
         input_row.ok_or_else(|| anyhow::anyhow!("input row {} disappeared", job.input_id))?;
     let input_rel = input_path
         .ok_or_else(|| anyhow::anyhow!("input file purged for input_id {}", job.input_id))?;
@@ -255,7 +255,13 @@ async fn process_job(state: &AppState, job: &QueuedJob) -> anyhow::Result<()> {
         .extension()
         .and_then(|s| s.to_str())
         .unwrap_or("jpg");
-    let upload_name = format!("zun_{}.{ext}", job.id);
+    // Name the upload after the input's content hash, not the job id.
+    // ComfyUI never prunes its `input/` dir, and a job-id name meant running
+    // five prompts against one photo left five identical copies there
+    // forever. With `overwrite=true` a content-addressed name is idempotent,
+    // so the directory grows with distinct inputs instead of with jobs.
+    // (The *output* prefix stays job-scoped — `primary_output` matches on it.)
+    let upload_name = format!("zun_{input_sha}.{ext}");
     let stored_name = state.comfy.upload_image(input_bytes, &upload_name).await?;
 
     // Patch workflow: prompt + image + filename prefix + seed.
@@ -410,12 +416,6 @@ async fn finalize_output(
         return Ok(());
     }
 
-    // Eager render of thumb + preview so the phone never pays for encode
-    // latency on first view. Failures are logged inside the helper and
-    // never bubble up — the job is already done.
-    crate::derived_images::generate_for_job(&state.db, &state.config.data_dir, &job.id, abs_output)
-        .await;
-
     tracing::info!(
         target: "audit",
         event = "job.done",
@@ -426,5 +426,24 @@ async fn finalize_output(
         height = ?height,
         duration_ms = started_at.elapsed().as_millis() as u64,
     );
+
+    // Render thumb + preview off the worker's critical path. Encoding the
+    // four renditions costs ~2.5 s (release) against ~3.3 s of GPU time, so
+    // awaiting it here left the card idle for nearly half of each job's wall
+    // clock and made the next queued job wait on JPEG/AVIF encoding.
+    // Detached, the worker goes straight back for the next job.
+    //
+    // Nothing depends on this finishing: the image handlers lazily generate
+    // any rendition that is missing (`derived_images::ensure_one`), so a
+    // failure here, or a shutdown that kills the task mid-encode, costs one
+    // slow first view and nothing else.
+    let db = state.db.clone();
+    let data_dir = state.config.data_dir.clone();
+    let job_id = job.id.clone();
+    let output_for_render = abs_output.to_path_buf();
+    tokio::spawn(async move {
+        crate::derived_images::generate_for_job(&db, &data_dir, &job_id, &output_for_render).await;
+    });
+
     Ok(())
 }
