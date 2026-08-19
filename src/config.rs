@@ -20,6 +20,20 @@ pub struct Config {
     /// Days of daily database backups to keep in `data/backups/`.
     #[serde(default = "default_retention_days")]
     pub backup_keep_days: u32,
+    /// Run one throwaway generation at startup so the first real job does
+    /// not pay to load the model (~20 s versus ~3 s once resident).
+    ///
+    /// Off by default, because both machines this has run on share their
+    /// GPU with something else: the deployment host's Arc B580 (11.93 GiB)
+    /// also serves Jellyfin transcodes and Immich ML, and warming pins
+    /// ~7.5 GiB from boot instead of releasing it between jobs. The cost of
+    /// forgetting to turn this off there is other services losing the card;
+    /// the cost of forgetting to turn it on is one slow job after a
+    /// restart. The cheaper mistake gets to be the default.
+    ///
+    /// Turn it on where the GPU belongs to this server alone.
+    #[serde(default)]
+    pub warmup_on_start: bool,
     /// ComfyUI's own data directory (the one holding `input/` and
     /// `output/`), when it runs on this machine. Optional and unset by
     /// default.

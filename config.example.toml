@@ -73,6 +73,20 @@ log_format = "auto"
 #   Days of daily database snapshots to keep in <data_dir>/backups/.
 # backup_keep_days = 30
 
+# warmup_on_start (default false)
+#   Run one throwaway generation at startup so the first real job does
+#   not wait for the model to load. Measured: ~20 s for the first job
+#   after a ComfyUI restart versus ~3 s once the weights are resident.
+#
+#   Off by default because it keeps those weights (~7.5 GiB for FLUX2
+#   klein) pinned from boot rather than loading them on demand. That is
+#   pure win on a card this server owns outright, and a problem on one
+#   it shares — the deployment host's GPU also runs Jellyfin transcodes
+#   and Immich ML.
+#
+#   Turn it on where the GPU is dedicated to this server.
+# warmup_on_start = true
+
 # comfy_data_dir (default: unset)
 #   ComfyUI's own data directory — the one containing input/ and output/.
 #   Set it only when ComfyUI runs on this machine.

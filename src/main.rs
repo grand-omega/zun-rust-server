@@ -63,7 +63,11 @@ async fn main() -> anyhow::Result<()> {
     // as fatal, so the whole process goes down and systemd restarts it.
     // Warm-up is best-effort and exits on its own once done, so it is
     // deliberately not `supervise`d — a normal exit here is not a fault.
-    worker::spawn_warmup(state.clone(), shutdown_rx.clone());
+    if config.warmup_on_start {
+        worker::spawn_warmup(state.clone(), shutdown_rx.clone());
+    } else {
+        tracing::debug!("warmup_on_start is off; the first job will load the model");
+    }
 
     supervise("worker", worker_handle, shutdown_rx.clone());
     supervise("purge", purge_handle, shutdown_rx.clone());

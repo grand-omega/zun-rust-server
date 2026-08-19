@@ -54,6 +54,7 @@ section; in short:
 | `comfy_url` | `http://127.0.0.1:8188` | ComfyUI HTTP base |
 | `data_dir` | `./data` | Houses `jobs.db` and `{cache,outputs,thumbs,previews}/` |
 | `log_format` | `auto` | `auto` (pretty on TTY, JSON otherwise), `pretty`, or `json` |
+| `warmup_on_start` | `false` | Load the model at startup instead of on the first job; leave off when the GPU is shared |
 | `comfy_data_dir` | — (unset) | ComfyUI's dir holding `input/`+`output/`; lets the purge task clean up the `zun_*` files this server leaves there |
 
 Workflows are baked into the binary at compile time — there is no
