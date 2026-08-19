@@ -450,11 +450,37 @@ async fn update_rejects_out_of_range_timeout_seconds() {
 }
 
 #[tokio::test]
+async fn accepts_a_long_chinese_label() {
+    // The caps are byte counts, so CJK costs 3x per character. At the
+    // original 200 B a perfectly ordinary Chinese label (~66 characters)
+    // was rejected — a product constraint that was never intended, on a
+    // server whose user writes Chinese.
+    let app = app_with_workflow().await;
+    let label = "\u{6f2b}\u{753b}\u{98ce}\u{683c}".repeat(50); // 200 chars = 600 bytes
+    assert!(label.len() > 200, "must exceed the old byte cap");
+    let resp = app
+        .router
+        .clone()
+        .oneshot(authed_json(
+            "POST",
+            "/api/v1/prompts",
+            json!({ "label": label, "text": "x", "workflow": "flux2_klein_edit" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::CREATED,
+        "long CJK label must be accepted"
+    );
+}
+
+#[tokio::test]
 async fn create_rejects_oversized_label_and_description() {
     let app = app_with_workflow().await;
     for (field, value) in [
-        ("label", "L".repeat(201)),
-        ("description", "D".repeat(1001)),
+        ("label", "L".repeat(1001)),
+        ("description", "D".repeat(4001)),
     ] {
         let mut body = json!({
             "label": "ok",

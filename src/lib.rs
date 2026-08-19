@@ -54,8 +54,17 @@ pub(crate) const MAX_PROMPT_LEN: usize = 8 * 1024;
 /// [`MAX_PROMPT_LEN`] from the start; these close the gap for the fields
 /// alongside it, so one handler no longer bounds some of its inputs and not
 /// others.
-pub(crate) const MAX_LABEL_LEN: usize = 200;
-pub(crate) const MAX_DESCRIPTION_LEN: usize = 1000;
+///
+/// These are byte counts, and the point of them is to keep bulk out of the
+/// DB and the audit log — not to tell a user how long a label may be. That
+/// distinction decides the value: a byte cap costs three times as much per
+/// character in CJK as in Latin text, and this server's user writes Chinese,
+/// so a cap tight enough to look reasonable in bytes (200 B) binds at ~66
+/// Chinese characters — a product constraint nobody asked for, hit by an
+/// ordinary label. Sized so that cannot happen in any script while still
+/// bounding abuse; both stay well under `text`'s own cap.
+pub(crate) const MAX_LABEL_LEN: usize = 1000;
+pub(crate) const MAX_DESCRIPTION_LEN: usize = 4000;
 /// `inputs.original_name` — a filename echoed back for display only.
 pub(crate) const MAX_INPUT_NAME_LEN: usize = 255;
 

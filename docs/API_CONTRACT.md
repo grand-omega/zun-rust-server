@@ -21,7 +21,7 @@ Plain HTTP behind a TLS-terminating reverse proxy; bearer-token auth.
   `need_upload` carries extra fields — see POST `/jobs`.
 - **Limits**: multipart upload ≤ 20 MiB (over the limit returns 413
   `payload_too_large`, not 400); `prompt_text` and prompt `text` ≤ 8 KiB;
-  `label` ≤ 200 B; `description` ≤ 1000 B; `input_name` ≤ 255 B;
+  `label` ≤ 1000 B; `description` ≤ 4000 B; `input_name` ≤ 255 B;
   `timeout_seconds` in `1..=1800` (default `120`); per-request timeout 120 s.
 
 ---
@@ -106,7 +106,7 @@ Catalog of saved prompt presets. Soft-deleted rows do not appear in any read.
 ```
 
 `label` and `text` must be non-empty after trim; `text` ≤ 8 KiB, `label`
-≤ 200 B, `description` ≤ 1000 B; `workflow` must appear in `/capabilities`
+≤ 1000 B, `description` ≤ 4000 B; `workflow` must appear in `/capabilities`
 with `supported: true`. `timeout_seconds` is optional and must fall in
 `1..=1800`; omitted, it falls back to `120` (sized for a cold ComfyUI,
 which stages ~4 GB of weights on its first job).
