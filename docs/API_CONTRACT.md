@@ -1,4 +1,4 @@
-# API Contract — zun-rust-server v3.0.0
+# API Contract — zun-rust-server v3.1.0
 
 Single-user backend for ComfyUI image-edit jobs, driven by the Android client.
 Plain HTTP behind a TLS-terminating reverse proxy; bearer-token auth.
@@ -33,7 +33,7 @@ Plain HTTP behind a TLS-terminating reverse proxy; bearer-token auth.
 ```json
 {
   "status": "ok",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "disk": { "data_bytes": 1234567 }
 }
 ```
@@ -44,7 +44,7 @@ Plain HTTP behind a TLS-terminating reverse proxy; bearer-token auth.
 
 ```json
 {
-  "version": "3.0.0",
+  "version": "3.1.0",
   "features": {
     "image_edit": true,
     "auto_mask": false,
