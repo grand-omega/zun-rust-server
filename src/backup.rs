@@ -67,15 +67,19 @@ pub async fn snapshot_once(
     // mid-VACUUM would otherwise leave a corrupt file at today's dated
     // name for up to 24h. Write to a temp sibling instead and rename into
     // place, same crash-safety as `paths::atomic_write`.
-    let tmp = crate::paths::tmp_sibling(&abs);
+    // `Staged` removes the temp file if either step below fails; nothing
+    // else would (see its docs — `prune_old`'s `.db` filter never matches a
+    // `.tmp.` name).
+    let mut staged = crate::paths::Staged::new(&abs);
 
     // SQLite doesn't accept a parameter binding for the destination path,
     // so we string-substitute. data_dir is admin-controlled config; we still
     // escape single quotes defensively.
-    let escaped = tmp.to_string_lossy().replace('\'', "''");
+    let escaped = staged.path().to_string_lossy().replace('\'', "''");
     let sql = format!("VACUUM INTO '{escaped}'");
     sqlx::query(sqlx::AssertSqlSafe(sql)).execute(pool).await?;
-    tokio::fs::rename(&tmp, &abs).await?;
+    tokio::fs::rename(staged.path(), &abs).await?;
+    staged.commit();
     Ok(abs)
 }
 
