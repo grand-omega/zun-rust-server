@@ -8,8 +8,8 @@ Privacy rule for every task (constitution VI): steps marked **[operator]** are r
 
 ## 1. Embedded workflow assets
 
-- [ ] 1.1 Copy `workflows/flux3_klein_edit.json` from that pipeline tag. Verify: `cmp` against the pipeline's file reports no difference.
-- [ ] 1.2 In `workflows/MANIFEST.yaml`, add only the `flux3_klein_edit` entry (identical to the pipeline's) and add `flux3_klein` to the family list comment. Leave the existing differences from the pipeline manifest as they are. Verify: `git diff workflows/MANIFEST.yaml` shows only those additions.
+- [x] 1.1 Copy `workflows/flux3_klein_edit.json` from that pipeline tag. Verify: `cmp` against the pipeline's file reports no difference. Copied from zun-flux-pipeline branch `feat/flux3-klein-edit` (c586e6b) before the release tag exists; re-run `cmp` against the tag once it is cut.
+- [x] 1.2 In `workflows/MANIFEST.yaml`, add only the `flux3_klein_edit` entry (identical to the pipeline's) and add `flux3_klein` to the family list comment. Leave the existing differences from the pipeline manifest as they are. Verify: `git diff workflows/MANIFEST.yaml` shows only those additions.
 
 ## 2. Workflow registry
 
