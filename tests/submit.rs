@@ -257,6 +257,75 @@ async fn submit_prompt_text_with_workflow_works() {
 }
 
 #[tokio::test]
+async fn submit_prompt_text_with_flux3_workflow_stores_flux3() {
+    let mut app = common::test_app().await;
+    common::seed_workflow(
+        &mut app,
+        "flux3_klein_edit",
+        common::supported_edit_workflow(),
+    );
+    let router = app.router.clone();
+    let (ct, body) = common::multipart_submit(
+        b"flux3",
+        "image/jpeg",
+        None,
+        Some("free text"),
+        Some("flux3_klein_edit"),
+    );
+    let resp = router
+        .clone()
+        .oneshot(submit_request(&ct, body))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    let job_id = body_json(resp).await["job_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let resp = router
+        .oneshot(authed_get(&format!("/api/v1/jobs/{job_id}")))
+        .await
+        .unwrap();
+    assert_eq!(body_json(resp).await["workflow"], "flux3_klein_edit");
+}
+
+#[tokio::test]
+async fn submit_by_flux2_prompt_id_ignores_flux3_workflow_field() {
+    let mut app = common::test_app().await;
+    let prompt_id = seed_test_prompt(&mut app).await;
+    common::seed_workflow(
+        &mut app,
+        "flux3_klein_edit",
+        common::supported_edit_workflow(),
+    );
+    let router = app.router.clone();
+    let (ct, body) = common::multipart_submit(
+        b"legacy",
+        "image/jpeg",
+        Some(prompt_id),
+        None,
+        Some("flux3_klein_edit"),
+    );
+    let resp = router
+        .clone()
+        .oneshot(submit_request(&ct, body))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    let job_id = body_json(resp).await["job_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let resp = router
+        .oneshot(authed_get(&format!("/api/v1/jobs/{job_id}")))
+        .await
+        .unwrap();
+    assert_eq!(body_json(resp).await["workflow"], "flux2_klein_edit");
+}
+
+#[tokio::test]
 async fn submit_over_max_upload_bytes_returns_413() {
     // Regression test for SEC-011: DefaultBodyLimit::max(MAX_UPLOAD_BYTES)
     // in lib.rs (20 MiB) must actually be wired to this route, not just

@@ -13,16 +13,16 @@ Privacy rule for every task (constitution VI): steps marked **[operator]** are r
 
 ## 2. Workflow registry
 
-- [ ] 2.1 In `src/workflow.rs`, set `ENABLED_WORKFLOWS = &["flux3_klein_edit", "flux2_klein_edit"]` and `DEFAULT_WORKFLOW = "flux3_klein_edit"`. Verify: `cargo build`.
-- [ ] 2.2 Add a `"flux3_klein_edit"` arm to `workflow_metadata` (display name "FLUX 3 klein", kind `image_edit`, `requires_input_image: true`, not experimental, runtime `comfyui`, other fields `None`). Do not touch `humanize_workflow_name` or the dead `flux2_klein_9b_kv_edit` arm. Verify: the unit tests in 2.3 pass.
-- [ ] 2.3 Unit tests in `src/workflow.rs`:
+- [x] 2.1 In `src/workflow.rs`, set `ENABLED_WORKFLOWS = &["flux3_klein_edit", "flux2_klein_edit"]` and `DEFAULT_WORKFLOW = "flux3_klein_edit"`. Verify: `cargo build`.
+- [x] 2.2 Add a `"flux3_klein_edit"` arm to `workflow_metadata` (display name "FLUX 3 klein", kind `image_edit`, `requires_input_image: true`, not experimental, runtime `comfyui`, other fields `None`). Do not touch `humanize_workflow_name` or the dead `flux2_klein_9b_kv_edit` arm. Verify: the unit tests in 2.3 pass.
+- [x] 2.3 Unit tests in `src/workflow.rs`:
   - rename `flux2_klein_edit_remains_default` → `flux3_klein_edit_is_default` (FLUX 3 is default with "FLUX 3 klein"; FLUX 2 is supported with `default: false`);
   - add a `load_registry()` test: both real embedded templates are loaded, and exactly `flux3_klein_edit` is default;
   - extend `embedded_template_loads_and_carries_placeholders` to `flux3_klein_edit`;
   - add a case where `build_edit_workflow` on the real FLUX.3 template leaves no `_PLACEHOLDER` strings and sets `KSampler`'s seed to a JSON number.
 
   Verify: `cargo test --lib workflow`.
-- [ ] 2.4 Integration tests:
+- [x] 2.4 Integration tests:
   - change `tests/common/mod.rs:99` to use `workflow::DEFAULT_WORKFLOW`, and make the shared helper able to seed both workflows;
   - update `tests/health.rs`: `/capabilities` lists both workflows sorted by name, `flux3_klein_edit` has `default: true` and "FLUX 3 klein", and `flux2_klein_edit` has `default: false`;
   - add `tests/submit.rs` cases: a `prompt_text` submit with `workflow: "flux3_klein_edit"` stores that workflow, and a submit by `prompt_id` for a prompt stored with `flux2_klein_edit`, also carrying `workflow: "flux3_klein_edit"`, still stores `flux2_klein_edit`.
