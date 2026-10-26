@@ -60,6 +60,32 @@ Plain HTTP behind a TLS-terminating reverse proxy; bearer-token auth.
       "kind": "image_edit",
       "requires_input_image": true,
       "experimental": false,
+      "default": false,
+      "runtime": "comfyui",
+      "pipeline": null,
+      "model_path": null,
+      "dtype": null,
+      "offload_mode": null,
+      "default_steps": null,
+      "default_width": null,
+      "default_height": null,
+      "loaded": true,
+      "supported": true,
+      "placeholders": [
+        "PROMPT_PLACEHOLDER",
+        "INPUT_IMAGE_PLACEHOLDER",
+        "FILENAME_PREFIX_PLACEHOLDER",
+        "SEED_PLACEHOLDER"
+      ],
+      "warning": null,
+      "reason": null
+    },
+    {
+      "name": "flux3_klein_edit",
+      "display_name": "FLUX 3 klein",
+      "kind": "image_edit",
+      "requires_input_image": true,
+      "experimental": false,
       "default": true,
       "runtime": "comfyui",
       "pipeline": null,
@@ -84,8 +110,11 @@ Plain HTTP behind a TLS-terminating reverse proxy; bearer-token auth.
 }
 ```
 
-Only `flux2_klein_edit` is wired up in this build (the 9B-KV/Diffusers workflow
-was removed). The set is baked in at compile time — there's no runtime knob.
+`flux2_klein_edit` and `flux3_klein_edit` (default) are wired up in this build
+(the 9B-KV/Diffusers workflow was removed). The set is baked in at compile
+time — there's no runtime knob. `workflows` is sorted by name, and exactly one
+entry has `default: true`. The default is advisory: the server never
+substitutes it for a missing `workflow`.
 
 ---
 
@@ -108,8 +137,17 @@ Catalog of saved prompt presets. Soft-deleted rows do not appear in any read.
 `label` and `text` must be non-empty after trim; `text` ≤ 8 KiB, `label`
 ≤ 1000 B, `description` ≤ 4000 B; `workflow` must appear in `/capabilities`
 with `supported: true`. `timeout_seconds` is optional and must fall in
-`1..=1800`; omitted, it falls back to `120` (sized for a cold ComfyUI,
-which stages ~4 GB of weights on its first job).
+`1..=1800`; omitted, it falls back to `120` (sized for a cold ComfyUI on
+FLUX 2 klein, which stages ~4 GB of weights on its first job).
+<!-- TODO(operator): add-flux3-klein-edit tasks 3.1-3.2 — replace with the
+FLUX.3 default and its measured cold-start numbers (FLUX.3 stages ~10.7 GB
+and runs 16 steps). -->
+
+A saved prompt keeps the `workflow` it was stored with; changing the
+server's default does not move it. The Android app cannot change a prompt's
+workflow (its edits send only label and text), so to move a saved prompt to
+`flux3_klein_edit` from the app, recreate it. API clients can `PATCH`
+`workflow` directly.
 
 Response: full prompt row (see GET).
 

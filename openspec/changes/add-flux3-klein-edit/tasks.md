@@ -43,15 +43,15 @@ Privacy rule for every task (constitution VI): steps marked **[operator]** are r
 
 ## 4. Docs and quality gates
 
-- [ ] 4.1 Update `docs/API_CONTRACT.md`:
+- [x] 4.1 Update `docs/API_CONTRACT.md`:
   - the `/capabilities` example shows both workflows alphabetically, with FLUX.3 as default;
   - the :87 note becomes "`flux2_klein_edit` and `flux3_klein_edit` (default) are wired up";
   - the timeout note (about :109-112) carries the 3.1 numbers;
   - a note that saved prompts keep their stored workflow and must be recreated to change it;
   - all job-state examples use `done`.
 
-  Update the `README.md` summary lines (FLUX.3 setup, measured job time) and add the rollback procedure from design Decision 7. Verify: every example payload is valid JSON and names only workflows in `ENABLED_WORKFLOWS`.
-- [ ] 4.2 Run the full gate: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test --locked` and `cargo audit`. Verify: all pass. The pre-commit hook is not bypassed.
+  Update the `README.md` summary lines (FLUX.3 setup, measured job time) and add the rollback procedure from design Decision 7. Verify: every example payload is valid JSON and names only workflows in `ENABLED_WORKFLOWS`. Done except the 3.1 timeout numbers and the measured FLUX.3 job time, left as `TODO(operator)` in `docs/API_CONTRACT.md` and `README.md`.
+- [ ] 4.2 Run the full gate: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test --locked` and `cargo audit`. Verify: all pass. The pre-commit hook is not bypassed. Status 2026-10-26: fmt, clippy and `cargo test --locked` (137 tests) pass; `cargo audit` fails on 10 advisories in dependencies unchanged from `origin/dev` (rustls, rustls-webpki, quinn-proto, ctutils, webpki-root-certs, tokio, paste) — needs a separate dependency bump.
 - [ ] 4.3 **[operator]** End-to-end against live ComfyUI with `warmup_on_start = true`:
   - warm-up completes;
   - `GET /api/v1/capabilities` shows FLUX.3 as default;
