@@ -10,7 +10,7 @@
 //!    disk, mark `done`.
 //! 4. Any error → mark `failed` with message; move on.
 //!
-//! Concurrency: exactly one job at a time. FLUX2 saturates the GPU.
+//! Concurrency: exactly one job at a time. FLUX saturates the GPU.
 
 use std::time::Duration;
 

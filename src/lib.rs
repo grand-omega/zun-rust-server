@@ -77,6 +77,14 @@ pub(crate) const MAX_INPUT_NAME_LEN: usize = 255;
 /// and ~105 s for that same first job when something else is holding most
 /// of the VRAM. 60 s covered the warm case and quietly failed the third
 /// one, so the default now leaves room for a cold start under contention.
+///
+/// TODO(operator): add-flux3-klein-edit tasks 3.1-3.2. The numbers above are
+/// FLUX2; the default is now FLUX.3 klein (~10.7 GB staged, 16 steps), so
+/// 120 s is unverified. Measure three runs each (warm; cold after restart;
+/// cold after restart with ~6 GB VRAM held elsewhere right after a FLUX2
+/// job; FLUX.3 -> FLUX2 swap), set this to >= 1.5x the slowest run rounded
+/// up to a multiple of 30 s (widen `MAX_TIMEOUT_SECONDS` if it exceeds
+/// it), and rewrite this comment with the FLUX.3 numbers.
 pub const DEFAULT_TIMEOUT_SECONDS: u64 = 120;
 
 /// Accepted range for a per-prompt `timeout_seconds`. Enforced when a

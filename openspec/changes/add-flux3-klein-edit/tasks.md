@@ -38,8 +38,8 @@ Privacy rule for every task (constitution VI): steps marked **[operator]** are r
   - a FLUX.3 → FLUX 2 swap.
 
   Also sample resident VRAM after warm-up. Verify: the operator reports every wall time and the resident VRAM, which are recorded in the PR description.
-- [ ] 3.2 Set `DEFAULT_TIMEOUT_SECONDS` in `src/lib.rs` per design Decision 5, and rewrite its doc comment with the 3.1 numbers. If the new value exceeds the per-prompt accepted range, widen that range too. Verify: the new value is at least 1.5× the slowest 3.1 run, and `cargo test --locked` passes.
-- [ ] 3.3 Update the FLUX2-specific comments in `src/worker.rs:13`, `src/comfy.rs:52` and the warm-up section of `config.example.toml` (:76-88), using the resident VRAM measured in 3.1. Ask the operator whether the "GPU also runs Jellyfin/Immich" note still describes the RTX 4070 Ti Super host, and correct it if not. Verify: `grep -n FLUX2 src config.example.toml` hits only lines that are still accurate.
+- [ ] 3.2 Set `DEFAULT_TIMEOUT_SECONDS` in `src/lib.rs` per design Decision 5, and rewrite its doc comment with the 3.1 numbers. If the new value exceeds the per-prompt accepted range, widen that range too. Verify: the new value is at least 1.5× the slowest 3.1 run, and `cargo test --locked` passes. Blocked on 3.1: value kept at 120 with a `TODO(operator)` in `src/lib.rs`.
+- [x] 3.3 Update the FLUX2-specific comments in `src/worker.rs:13`, `src/comfy.rs:52` and the warm-up section of `config.example.toml` (:76-88), using the resident VRAM measured in 3.1. Ask the operator whether the "GPU also runs Jellyfin/Immich" note still describes the RTX 4070 Ti Super host, and correct it if not. Verify: `grep -n FLUX2 src config.example.toml` hits only lines that are still accurate. Done except the measured FLUX.3 resident VRAM/timings and the Jellyfin/Immich question, left as `TODO(operator)` in `config.example.toml`.
 
 ## 4. Docs and quality gates
 

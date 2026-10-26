@@ -49,8 +49,8 @@ const BASE_BACKOFF: Duration = Duration::from_millis(500);
 /// backend bug returning an unbounded body would OOM the only process on the
 /// box — reqwest has no built-in cap, so impose one here.
 const MAX_JSON_BYTES: usize = 8 * 1024 * 1024;
-/// Same ceiling for `/view` image downloads. Generous next to a FLUX2 PNG
-/// (single-digit MB) while still bounded.
+/// Same ceiling for `/view` image downloads. Generous next to a ~1 MP FLUX
+/// 2 / FLUX.3 PNG (single-digit MB) while still bounded.
 const MAX_IMAGE_BYTES: usize = 128 * 1024 * 1024;
 
 /// How long to wait for the WebSocket TCP connect + upgrade handshake
