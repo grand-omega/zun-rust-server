@@ -141,7 +141,8 @@ with `supported: true`. `timeout_seconds` is optional and must fall in
 ComfyUI. On the RTX 4070 Ti Super (measured 2026-10-27, 1 MP input), the
 first FLUX.3 klein job after a ComfyUI restart took 18.4–21.3 s, and
 16.3–17.4 s with ~6 GB of VRAM held by another process (two three-run
-matrices). A FLUX 2 klein
+matrices). With a FLUX 2 job run just before that restart, it took
+23.7–23.9 s (three runs). A FLUX 2 klein
 first job has taken ~105 s when something else held most of the VRAM.
 
 A saved prompt keeps the `workflow` it was stored with; changing the
