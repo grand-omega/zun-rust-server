@@ -75,14 +75,18 @@ log_format = "auto"
 
 # warmup_on_start (default false)
 #   Run one throwaway generation at startup so the first real job does
-#   not wait for the model to load. Measured: ~20 s for the first job
-#   after a ComfyUI restart versus ~3 s once the weights are resident.
+#   not wait for the model to load. It warms the default workflow
+#   (FLUX.3 klein). Measured on the RTX 4070 Ti Super (2026-10-27, 1 MP):
+#   18.4-21.3 s for the first job after a ComfyUI restart versus
+#   7.6-7.9 s once the weights are resident; the warm-up itself took
+#   ~21 s from server start.
 #
-#   Off by default because it keeps those weights (~7.5 GiB for FLUX2
-#   klein) pinned from boot rather than loading them on demand. That is
-#   pure win on a card this server owns outright, and a problem on one
-#   it shares — the deployment host's GPU also runs Jellyfin transcodes
-#   and Immich ML.
+#   Off by default because it keeps those weights (9964 MiB of VRAM in use
+#   after a FLUX.3 klein warm-up, same host) pinned from boot rather than
+#   loading them on demand. That is pure win on a card this server owns
+#   outright, and a problem on one it shares. The RTX 4070 Ti Super
+#   production host runs neither Jellyfin nor Immich (checked
+#   2026-10-27), so nothing else there competes for that VRAM.
 #
 #   Turn it on where the GPU is dedicated to this server.
 # warmup_on_start = true

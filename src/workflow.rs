@@ -20,10 +20,10 @@ static EMBEDDED_WORKFLOWS: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/work
 /// `workflows/` dir may contain more files (a library for future
 /// pipelines); this list gates what's actually wired up. Updating
 /// requires a code change + recompile, on purpose.
-pub const ENABLED_WORKFLOWS: &[&str] = &["flux2_klein_edit"];
+pub const ENABLED_WORKFLOWS: &[&str] = &["flux3_klein_edit", "flux2_klein_edit"];
 
 /// The workflow advertised as `default: true` in `/capabilities`.
-pub const DEFAULT_WORKFLOW: &str = "flux2_klein_edit";
+pub const DEFAULT_WORKFLOW: &str = "flux3_klein_edit";
 
 // --- Placeholder tokens (mirrors project-zun/doc/WORKFLOWS.md). -----------
 
@@ -223,6 +223,21 @@ struct WorkflowMetadata {
 
 fn workflow_metadata(name: &str) -> WorkflowMetadata {
     match name {
+        "flux3_klein_edit" => WorkflowMetadata {
+            display_name: "FLUX 3 klein".to_string(),
+            kind: "image_edit",
+            requires_input_image: true,
+            experimental: false,
+            runtime: "comfyui",
+            pipeline: None,
+            model_path: None,
+            dtype: None,
+            offload_mode: None,
+            default_steps: None,
+            default_width: None,
+            default_height: None,
+            warning: None,
+        },
         "flux2_klein_edit" => WorkflowMetadata {
             display_name: "FLUX 2 klein".to_string(),
             kind: "image_edit",
@@ -445,37 +460,75 @@ mod tests {
     }
 
     #[test]
-    fn flux2_klein_edit_remains_default() {
+    fn flux3_klein_edit_is_default() {
+        let template = json!({
+            "4": { "inputs": { "image": "INPUT_IMAGE_PLACEHOLDER" } },
+            "9": { "inputs": { "text": "PROMPT_PLACEHOLDER" } },
+            "16": { "inputs": { "noise_seed": "SEED_PLACEHOLDER" } },
+            "19": { "inputs": { "filename_prefix": "FILENAME_PREFIX_PLACEHOLDER" } }
+        });
         let mut templates = HashMap::new();
-        templates.insert(
-            "flux2_klein_edit".to_string(),
-            json!({
-                "4": { "inputs": { "image": "INPUT_IMAGE_PLACEHOLDER" } },
-                "9": { "inputs": { "text": "PROMPT_PLACEHOLDER" } },
-                "16": { "inputs": { "noise_seed": "SEED_PLACEHOLDER" } },
-                "19": { "inputs": { "filename_prefix": "FILENAME_PREFIX_PLACEHOLDER" } }
-            }),
-        );
+        templates.insert("flux3_klein_edit".to_string(), template.clone());
+        templates.insert("flux2_klein_edit".to_string(), template);
 
-        let support = support_for_templates(&templates, "flux2_klein_edit");
-        let wf = support.get("flux2_klein_edit").unwrap();
+        let support = support_for_templates(&templates, DEFAULT_WORKFLOW);
+        let wf = support.get("flux3_klein_edit").unwrap();
         assert!(wf.supported);
-        assert_eq!(wf.display_name, "FLUX 2 klein");
+        assert_eq!(wf.display_name, "FLUX 3 klein");
         assert!(wf.requires_input_image);
         assert!(!wf.experimental);
         assert!(wf.default);
         assert_eq!(wf.warning, None);
+
+        let wf = support.get("flux2_klein_edit").unwrap();
+        assert!(wf.supported);
+        assert_eq!(wf.display_name, "FLUX 2 klein");
+        assert!(!wf.default);
+    }
+
+    #[test]
+    fn load_registry_enables_both_embedded_templates_with_flux3_default() {
+        let registry = load_registry().expect("load registry");
+        assert!(registry.templates.contains_key("flux3_klein_edit"));
+        assert!(registry.templates.contains_key("flux2_klein_edit"));
+        let defaults: Vec<_> = registry
+            .support_list()
+            .into_iter()
+            .filter(|s| s.default)
+            .map(|s| s.name)
+            .collect();
+        assert_eq!(defaults, vec!["flux3_klein_edit".to_string()]);
+        assert!(registry.supports("flux2_klein_edit").is_ok());
     }
 
     #[test]
     fn embedded_template_loads_and_carries_placeholders() {
-        // The vendored workflow under `workflows/flux2_klein_edit.json` is
-        // the contract with zun-flux-pipeline. If this fails, either the
-        // file moved or the upstream placeholder contract changed.
-        let loaded = load_embedded_template("flux2_klein_edit").expect("load embedded");
-        let body = loaded.to_string();
-        assert!(body.contains("PROMPT_PLACEHOLDER"));
-        assert!(body.contains("INPUT_IMAGE_PLACEHOLDER"));
-        assert!(body.contains("FILENAME_PREFIX_PLACEHOLDER"));
+        // The vendored workflows under `workflows/` are the contract with
+        // zun-flux-pipeline. If this fails, either a file moved or the
+        // upstream placeholder contract changed.
+        for name in ["flux2_klein_edit", "flux3_klein_edit"] {
+            let loaded = load_embedded_template(name).expect("load embedded");
+            let body = loaded.to_string();
+            assert!(body.contains("PROMPT_PLACEHOLDER"), "{name}");
+            assert!(body.contains("INPUT_IMAGE_PLACEHOLDER"), "{name}");
+            assert!(body.contains("FILENAME_PREFIX_PLACEHOLDER"), "{name}");
+            assert!(body.contains("SEED_PLACEHOLDER"), "{name}");
+        }
+    }
+
+    #[test]
+    fn build_edit_workflow_fills_every_placeholder_in_flux3_template() {
+        let template = load_embedded_template("flux3_klein_edit").expect("load embedded");
+        let built = build_edit_workflow(&template, "anime", "in.jpg", "abc-123", 12345);
+        assert!(!built.to_string().contains("_PLACEHOLDER"));
+
+        let ksampler = built
+            .as_object()
+            .unwrap()
+            .values()
+            .find(|node| node["class_type"] == "KSampler")
+            .expect("KSampler node");
+        assert!(ksampler["inputs"]["seed"].is_number());
+        assert_eq!(ksampler["inputs"]["seed"], 12345);
     }
 }

@@ -1,4 +1,4 @@
-# API Contract — zun-rust-server v3.1.0
+# API Contract — zun-rust-server v3.2.0
 
 Single-user backend for ComfyUI image-edit jobs, driven by the Android client.
 Plain HTTP behind a TLS-terminating reverse proxy; bearer-token auth.
@@ -33,7 +33,7 @@ Plain HTTP behind a TLS-terminating reverse proxy; bearer-token auth.
 ```json
 {
   "status": "ok",
-  "version": "3.1.0",
+  "version": "3.2.0",
   "disk": { "data_bytes": 1234567 }
 }
 ```
@@ -44,7 +44,7 @@ Plain HTTP behind a TLS-terminating reverse proxy; bearer-token auth.
 
 ```json
 {
-  "version": "3.1.0",
+  "version": "3.2.0",
   "features": {
     "image_edit": true,
     "auto_mask": false,
@@ -57,6 +57,32 @@ Plain HTTP behind a TLS-terminating reverse proxy; bearer-token auth.
     {
       "name": "flux2_klein_edit",
       "display_name": "FLUX 2 klein",
+      "kind": "image_edit",
+      "requires_input_image": true,
+      "experimental": false,
+      "default": false,
+      "runtime": "comfyui",
+      "pipeline": null,
+      "model_path": null,
+      "dtype": null,
+      "offload_mode": null,
+      "default_steps": null,
+      "default_width": null,
+      "default_height": null,
+      "loaded": true,
+      "supported": true,
+      "placeholders": [
+        "PROMPT_PLACEHOLDER",
+        "INPUT_IMAGE_PLACEHOLDER",
+        "FILENAME_PREFIX_PLACEHOLDER",
+        "SEED_PLACEHOLDER"
+      ],
+      "warning": null,
+      "reason": null
+    },
+    {
+      "name": "flux3_klein_edit",
+      "display_name": "FLUX 3 klein",
       "kind": "image_edit",
       "requires_input_image": true,
       "experimental": false,
@@ -84,8 +110,11 @@ Plain HTTP behind a TLS-terminating reverse proxy; bearer-token auth.
 }
 ```
 
-Only `flux2_klein_edit` is wired up in this build (the 9B-KV/Diffusers workflow
-was removed). The set is baked in at compile time — there's no runtime knob.
+`flux2_klein_edit` and `flux3_klein_edit` (default) are wired up in this build
+(the 9B-KV/Diffusers workflow was removed). The set is baked in at compile
+time — there's no runtime knob. `workflows` is sorted by name, and exactly one
+entry has `default: true`. The default is advisory: the server never
+substitutes it for a missing `workflow`.
 
 ---
 
@@ -108,8 +137,19 @@ Catalog of saved prompt presets. Soft-deleted rows do not appear in any read.
 `label` and `text` must be non-empty after trim; `text` ≤ 8 KiB, `label`
 ≤ 1000 B, `description` ≤ 4000 B; `workflow` must appear in `/capabilities`
 with `supported: true`. `timeout_seconds` is optional and must fall in
-`1..=1800`; omitted, it falls back to `120` (sized for a cold ComfyUI,
-which stages ~4 GB of weights on its first job).
+`1..=1800`; omitted, it falls back to `120`. That is sized for a cold
+ComfyUI. On the RTX 4070 Ti Super (measured 2026-10-27, 1 MP input), the
+first FLUX.3 klein job after a ComfyUI restart took 18.4–21.3 s, and
+16.3–17.4 s with ~6 GB of VRAM held by another process (two three-run
+matrices). With a FLUX 2 job run just before that restart, it took
+23.7–23.9 s (three runs). A FLUX 2 klein
+first job has taken ~105 s when something else held most of the VRAM.
+
+A saved prompt keeps the `workflow` it was stored with; changing the
+server's default does not move it. The Android app cannot change a prompt's
+workflow (its edits send only label and text), so to move a saved prompt to
+`flux3_klein_edit` from the app, recreate it. API clients can `PATCH`
+`workflow` directly.
 
 Response: full prompt row (see GET).
 

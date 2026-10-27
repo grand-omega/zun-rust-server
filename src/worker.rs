@@ -10,7 +10,7 @@
 //!    disk, mark `done`.
 //! 4. Any error → mark `failed` with message; move on.
 //!
-//! Concurrency: exactly one job at a time. FLUX2 saturates the GPU.
+//! Concurrency: exactly one job at a time. FLUX saturates the GPU.
 
 use std::time::Duration;
 
@@ -133,10 +133,13 @@ const WARMUP_PROBE_INTERVAL: Duration = Duration::from_secs(3);
 /// Run one throwaway generation so the first *real* job doesn't pay for
 /// loading the model.
 ///
-/// Measured on an RTX 4070 Ti Super: the first job after a ComfyUI restart
-/// takes ~20 s because it stages ~4 GB of weights, against ~3 s once they
-/// are resident. That 17 s lands squarely on the user's first tap. This
-/// moves it to boot, where nobody is waiting.
+/// Measured on the RTX 4070 Ti Super (gpu-dev-4004, 2026-10-27) with the
+/// default workflow, FLUX.3 klein (1 MP, 16 steps): the first job after a
+/// ComfyUI restart takes 18.4-21.3 s, against 7.6-7.9 s once the weights
+/// are resident (9964 MiB in use after warm-up). That difference lands
+/// squarely on the user's first tap. This moves it to boot, where nobody
+/// is waiting. (Historical, FLUX 2 klein: ~20 s cold versus ~3 s warm,
+/// staging ~4 GB of weights.)
 ///
 /// Best-effort throughout: every failure is logged and dropped. A backend
 /// that never comes up, a missing model, a workflow that no longer matches

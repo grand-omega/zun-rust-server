@@ -8,7 +8,7 @@
 #
 # Schema:
 #   <stem>:
-#     family:       flux2_klein | flux1_fill | utility
+#     family:       flux2_klein | flux3_klein | flux1_fill | utility
 #     kind:         t2i | edit | internal
 #     inputs:       list of required inputs — subset of {image, mask, reference}
 #     placeholders: list of required placeholders in this workflow
@@ -52,6 +52,14 @@ flux2_klein_ref_edit:
   placeholders: [PROMPT_PLACEHOLDER, INPUT_IMAGE_PLACEHOLDER, REFERENCE_IMAGE_PLACEHOLDER, FILENAME_PREFIX_PLACEHOLDER, SEED_PLACEHOLDER]
   public: true
   notes: Two-image conditioning — requires API extension to accept reference image.
+
+flux3_klein_edit:
+  family: flux3_klein
+  kind: edit
+  inputs: [image]
+  placeholders: [PROMPT_PLACEHOLDER, INPUT_IMAGE_PLACEHOLDER, FILENAME_PREFIX_PLACEHOLDER, SEED_PLACEHOLDER]
+  public: true
+  notes: FLUX.3 Image Klein distilled maskless edit — core graph of the official template, 16 steps.
 
 flux_fill_auto_mask:
   family: flux1_fill
