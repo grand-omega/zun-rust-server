@@ -77,7 +77,7 @@ log_format = "auto"
 #   Run one throwaway generation at startup so the first real job does
 #   not wait for the model to load. It warms the default workflow
 #   (FLUX.3 klein). Measured on the RTX 4070 Ti Super (2026-10-27, 1 MP):
-#   18.4-18.7 s for the first job after a ComfyUI restart versus
+#   18.4-21.3 s for the first job after a ComfyUI restart versus
 #   7.6-7.9 s once the weights are resident; the warm-up itself took
 #   ~21 s from server start.
 #

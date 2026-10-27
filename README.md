@@ -6,7 +6,7 @@ Single-user, self-hosted. Plain HTTP backend designed to live behind a reverse p
 
 ## Status
 
-**v3.1.0** — current stable release. Major version tracks the Android client: 3.x clients pair with a 3.x server. Plain HTTP behind a reverse proxy; multi-tenant scaffolding (per-IP rate limiter, proactive health probe, request-ID propagation) intentionally absent — see `docs/API_CONTRACT.md` for the surface. Verified against FLUX2 klein (~7 s per job on RTX 4070 Ti Super). Default workflow is now FLUX.3 klein (`flux3_klein_edit`), with FLUX2 klein (`flux2_klein_edit`) still enabled; FLUX.3 job time on the RTX 4070 Ti Super (1 MP input, 16 steps, measured 2026-10-27): ~8 s once the weights are resident, ~19 s for the first job after a ComfyUI restart.
+**v3.1.0** — current stable release. Major version tracks the Android client: 3.x clients pair with a 3.x server. Plain HTTP behind a reverse proxy; multi-tenant scaffolding (per-IP rate limiter, proactive health probe, request-ID propagation) intentionally absent — see `docs/API_CONTRACT.md` for the surface. Verified against FLUX2 klein (~7 s per job on RTX 4070 Ti Super). Default workflow is now FLUX.3 klein (`flux3_klein_edit`), with FLUX2 klein (`flux2_klein_edit`) still enabled; FLUX.3 job time on the RTX 4070 Ti Super (1 MP input, 16 steps, measured 2026-10-27): 7.6–7.9 s once the weights are resident, 18.4–21.3 s for the first job after a ComfyUI restart (two three-run matrices).
 
 ## Quick start
 
