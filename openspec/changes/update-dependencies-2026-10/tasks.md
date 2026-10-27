@@ -12,7 +12,7 @@
 
 ## 3. Release
 
-- [ ] 3.1 Bump to 3.2.1 in `Cargo.toml`, `Cargo.lock`, `README.md` and `docs/API_CONTRACT.md`, in its own commit titled `Bump to 3.2.1`. Verify: `grep -rn "3\.2\.0" Cargo.toml README.md docs/API_CONTRACT.md` returns no version strings, and `cargo test --locked` passes.
+- [x] 3.1 Bump to 3.2.1 in `Cargo.toml`, `Cargo.lock`, `README.md` and `docs/API_CONTRACT.md`, in its own commit titled `Bump to 3.2.1`. Verify: `grep -rn "3\.2\.0" Cargo.toml README.md docs/API_CONTRACT.md` returns no version strings, and `cargo test --locked` passes.
 - [ ] 3.2 **[operator]** Merge, then tag v3.2.1 on the dev-side commit and deploy on gpu-dev-4004 with backup and rollback. Verify: `/api/v1/health` reports `3.2.1`, `/capabilities` is unchanged apart from the version, and one `flux3_klein_edit` and one `flux2_klein_edit` job each reach `done` with a result download returning 200.
 
 ## Workflow follow-up
