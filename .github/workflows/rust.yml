@@ -18,7 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Block forbidden paths (secrets/user data)
         run: git ls-tree -r --name-only HEAD | ./scripts/check-forbidden-paths.sh
