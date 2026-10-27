@@ -6,13 +6,13 @@ Single-user, self-hosted. Plain HTTP backend designed to live behind a reverse p
 
 ## Status
 
-**v3.1.0** — current stable release. Major version tracks the Android client: 3.x clients pair with a 3.x server. Plain HTTP behind a reverse proxy; multi-tenant scaffolding (per-IP rate limiter, proactive health probe, request-ID propagation) intentionally absent — see `docs/API_CONTRACT.md` for the surface. Verified against FLUX2 klein (~7 s per job on RTX 4070 Ti Super).
+**v3.2.0** — current stable release. Major version tracks the Android client: 3.x clients pair with a 3.x server. Plain HTTP behind a reverse proxy; multi-tenant scaffolding (per-IP rate limiter, proactive health probe, request-ID propagation) intentionally absent — see `docs/API_CONTRACT.md` for the surface. Verified against FLUX2 klein (~7 s per job on RTX 4070 Ti Super). Default workflow is now FLUX.3 klein (`flux3_klein_edit`), with FLUX2 klein (`flux2_klein_edit`) still enabled; FLUX.3 job time on the RTX 4070 Ti Super (1 MP input, 16 steps, measured 2026-10-27): 7.6–7.9 s once the weights are resident, 18.4–21.3 s for the first job after a ComfyUI restart (two three-run matrices).
 
 ## Quick start
 
 Prerequisites:
 - Rust stable via [`rustup`](https://rustup.rs/)
-- ComfyUI running from `zun-flux-pipeline` (`just serve` there)
+- ComfyUI running from `zun-flux-pipeline` (`just serve` there), at a release that ships `flux3_klein_edit` (ComfyUI v0.42.4, FLUX.3 klein weights fetched with `just fetch-models`)
 
 Dev (from the repo root, finds `./config.toml`):
 
@@ -37,7 +37,7 @@ Hit `/api/v1/health` to verify:
 
 ```bash
 curl -s localhost:8080/api/v1/health | jq
-# { "status": "ok", "version": "3.1.0", "disk": { "data_bytes": 0 } }
+# { "status": "ok", "version": "3.2.0", "disk": { "data_bytes": 0 } }
 ```
 
 ## Configuration
@@ -84,6 +84,24 @@ exposed at runtime is gated by `ENABLED_WORKFLOWS` in
 `src/workflow.rs` — adding a new pipeline is a code change, not a
 config change. To update, edit the files under `workflows/` (or copy
 new ones in from the authoring repo) and `cargo build`.
+
+## Rolling back FLUX.3
+
+Reverting to a FLUX2-only build removes `flux3_klein_edit`: saved prompts
+bound to it then fail at submit and on edit, and queued FLUX.3 jobs fail in
+the worker. Prefer a **forward fix** — a release that sets
+`DEFAULT_WORKFLOW` back to `flux2_klein_edit` and keeps FLUX.3 enabled —
+as long as the pipeline runtime still supports FLUX.3. Full revert, in
+order:
+
+1. Stop the app from submitting.
+2. Let the queue drain, or cancel the remaining FLUX.3 jobs.
+3. Revert the Android default.
+4. Revert the server.
+5. Only then revert the zun-flux-pipeline pin.
+
+Saved prompts bound to `flux3_klein_edit` must then be deleted and
+recreated, because the app cannot change a prompt's workflow.
 
 ## Architecture
 

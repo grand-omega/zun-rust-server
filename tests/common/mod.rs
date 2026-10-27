@@ -96,7 +96,7 @@ pub fn spawn_worker_with_shutdown(
 pub fn seed_workflow(app: &mut TestApp, stem: &str, template: serde_json::Value) {
     let mut templates = app.state.workflows.templates.clone();
     templates.insert(stem.to_string(), template);
-    let support = workflow::support_for_templates(&templates, "flux2_klein_edit");
+    let support = workflow::support_for_templates(&templates, workflow::DEFAULT_WORKFLOW);
     let arc = Arc::new(workflow::WorkflowRegistry { templates, support });
     app.state.workflows = arc.clone();
     app.router = router(app.state.clone());

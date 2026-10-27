@@ -21,15 +21,19 @@ pub struct Config {
     #[serde(default = "default_retention_days")]
     pub backup_keep_days: u32,
     /// Run one throwaway generation at startup so the first real job does
-    /// not pay to load the model (~20 s versus ~3 s once resident).
+    /// not pay to load the model. Measured 2026-10-27 on the RTX 4070 Ti
+    /// Super with FLUX.3 klein, the default workflow: 18.4-21.3 s for the
+    /// first job after a ComfyUI restart versus 7.6-7.9 s once resident.
     ///
-    /// Off by default, because both machines this has run on share their
-    /// GPU with something else: the deployment host's Arc B580 (11.93 GiB)
-    /// also serves Jellyfin transcodes and Immich ML, and warming pins
-    /// ~7.5 GiB from boot instead of releasing it between jobs. The cost of
-    /// forgetting to turn this off there is other services losing the card;
-    /// the cost of forgetting to turn it on is one slow job after a
-    /// restart. The cheaper mistake gets to be the default.
+    /// Off by default. Warming pins the weights from boot (9964 MiB in use
+    /// after a FLUX.3 warm-up on that host) instead of releasing them
+    /// between jobs, which only matters where the GPU is shared. The legacy
+    /// Arc B580 (11.93 GiB) host also served Jellyfin transcodes and Immich
+    /// ML, and FLUX 2 klein pinned ~7.5 GiB there. The RTX 4070 Ti Super
+    /// production host runs neither (checked 2026-10-27). The cost of
+    /// forgetting to turn this off on a shared card is other services
+    /// losing it; the cost of forgetting to turn it on is one slow job after
+    /// a restart. The cheaper mistake gets to be the default.
     ///
     /// Turn it on where the GPU belongs to this server alone.
     #[serde(default)]

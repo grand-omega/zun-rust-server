@@ -64,6 +64,11 @@ async fn capabilities_reports_enabled_workflows() {
         "flux2_klein_edit",
         common::supported_edit_workflow(),
     );
+    common::seed_workflow(
+        &mut app,
+        "flux3_klein_edit",
+        common::supported_edit_workflow(),
+    );
 
     let resp = app
         .router
@@ -76,13 +81,18 @@ async fn capabilities_reports_enabled_workflows() {
     assert_eq!(body["features"]["image_edit"], true);
 
     let workflows = body["workflows"].as_array().unwrap();
-    let supported = workflows
-        .iter()
-        .find(|w| w["name"] == "flux2_klein_edit")
-        .unwrap();
-    assert_eq!(supported["supported"], true);
-    assert_eq!(supported["display_name"], "FLUX 2 klein");
-    assert_eq!(supported["default"], true);
+    let names: Vec<_> = workflows.iter().map(|w| w["name"].clone()).collect();
+    assert_eq!(names, ["flux2_klein_edit", "flux3_klein_edit"]);
+
+    let flux3 = &workflows[1];
+    assert_eq!(flux3["supported"], true);
+    assert_eq!(flux3["display_name"], "FLUX 3 klein");
+    assert_eq!(flux3["default"], true);
+
+    let flux2 = &workflows[0];
+    assert_eq!(flux2["supported"], true);
+    assert_eq!(flux2["display_name"], "FLUX 2 klein");
+    assert_eq!(flux2["default"], false);
     assert!(
         workflows.iter().all(|w| w["name"] != "flux_fill_auto_mask"),
         "capabilities should only expose enabled workflows"
