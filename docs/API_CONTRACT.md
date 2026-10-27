@@ -137,11 +137,11 @@ Catalog of saved prompt presets. Soft-deleted rows do not appear in any read.
 `label` and `text` must be non-empty after trim; `text` ≤ 8 KiB, `label`
 ≤ 1000 B, `description` ≤ 4000 B; `workflow` must appear in `/capabilities`
 with `supported: true`. `timeout_seconds` is optional and must fall in
-`1..=1800`; omitted, it falls back to `120` (sized for a cold ComfyUI on
-FLUX 2 klein, which stages ~4 GB of weights on its first job).
-<!-- TODO(operator): add-flux3-klein-edit tasks 3.1-3.2 — replace with the
-FLUX.3 default and its measured cold-start numbers (FLUX.3 stages ~10.7 GB
-and runs 16 steps). -->
+`1..=1800`; omitted, it falls back to `120`. That is sized for a cold
+ComfyUI. On the RTX 4070 Ti Super (measured 2026-10-27, 1 MP input), the
+first FLUX.3 klein job after a ComfyUI restart took 18.4–18.7 s, and
+16.4–16.7 s with ~6 GB of VRAM held by another process. A FLUX 2 klein
+first job has taken ~105 s when something else held most of the VRAM.
 
 A saved prompt keeps the `workflow` it was stored with; changing the
 server's default does not move it. The Android app cannot change a prompt's

@@ -71,20 +71,22 @@ pub(crate) const MAX_INPUT_NAME_LEN: usize = 255;
 /// Default per-job timeout for the ComfyUI poll loop. Overridable per
 /// custom_prompts row via `timeout_seconds`.
 ///
-/// Sized for a *cold* ComfyUI, not a warm one. Measured on an RTX 4070 Ti
-/// Super with FLUX2 klein: ~3 s per job once the model is resident, ~20 s
-/// for the first job after a ComfyUI restart (it stages ~4 GB of weights),
-/// and ~105 s for that same first job when something else is holding most
-/// of the VRAM. 60 s covered the warm case and quietly failed the third
-/// one, so the default now leaves room for a cold start under contention.
+/// Sized for a *cold* ComfyUI, not a warm one. Measured 2026-10-27 on the
+/// RTX 4070 Ti Super (gpu-dev-4004) with FLUX.3 klein, the default workflow
+/// (16 steps, 1 MP input, warm-up off, three runs each, submit to `done`):
+/// - 7.6-7.9 s per job once the weights are resident;
+/// - 18.4-18.7 s for the first job after a ComfyUI restart;
+/// - 16.4-16.7 s for the first FLUX.3 job after a restart with ~6 GB of
+///   VRAM held by another process, right after a FLUX2 job;
+/// - 9.6-10.3 s for a FLUX2 job right after a FLUX.3 job (model swap).
 ///
-/// TODO(operator): add-flux3-klein-edit tasks 3.1-3.2. The numbers above are
-/// FLUX2; the default is now FLUX.3 klein (~10.7 GB staged, 16 steps), so
-/// 120 s is unverified. Measure three runs each (warm; cold after restart;
-/// cold after restart with ~6 GB VRAM held elsewhere right after a FLUX2
-/// job; FLUX.3 -> FLUX2 swap), set this to >= 1.5x the slowest run rounded
-/// up to a multiple of 30 s (widen `MAX_TIMEOUT_SECONDS` if it exceeds
-/// it), and rewrite this comment with the FLUX.3 numbers.
+/// The OS page cache held the weights in every one of those runs.
+///
+/// add-flux3-klein-edit design Decision 5 asks for at least 1.5x the slowest
+/// run (18.7 s), rounded up to a multiple of 30 s, i.e. >= 30 s. The
+/// default stays at 120 s because it also covers FLUX2: its first job after
+/// a restart took ~105 s when something else held most of the VRAM. 60 s
+/// covered the warm case and quietly failed that one.
 pub const DEFAULT_TIMEOUT_SECONDS: u64 = 120;
 
 /// Accepted range for a per-prompt `timeout_seconds`. Enforced when a

@@ -31,17 +31,25 @@ Privacy rule for every task (constitution VI): steps marked **[operator]** are r
 
 ## 3. Timeout and runtime notes
 
-- [ ] 3.1 **[operator]** On the RTX 4070 Ti Super with `warmup_on_start = false` and a 1 MP input, run each of these three times:
+- [x] 3.1 **[operator]** On the RTX 4070 Ti Super with `warmup_on_start = false` and a 1 MP input, run each of these three times:
   - a warm FLUX.3 job;
   - a cold FLUX.3 job after a ComfyUI restart;
   - a cold FLUX.3 job after a restart with about 6 GB of VRAM held by another process, immediately after a FLUX 2 job (model swap);
   - a FLUX.3 → FLUX 2 swap.
 
   Also sample resident VRAM after warm-up. Verify: the operator reports every wall time and the resident VRAM, which are recorded in the PR description.
-- [ ] 3.2 Set `DEFAULT_TIMEOUT_SECONDS` in `src/lib.rs` per design Decision 5, and rewrite its doc comment with the 3.1 numbers. If the new value exceeds the per-prompt accepted range, widen that range too. Verify: the new value is at least 1.5× the slowest 3.1 run, and `cargo test --locked` passes.
+  - Done 2026-10-27 on gpu-dev-4004 (RTX 4070 Ti Super), staging server (this branch, release build) → staging ComfyUI v0.42.4 on :8189, `warmup_on_start = false`, synthetic 1 MP PNGs (a new image and a new saved prompt per job, so no ComfyUI cache hits). Wall time is from `POST /api/v1/jobs` until `GET /jobs/{id}?wait=25` returned `done`. All 18 jobs reached `done`, and every result download returned 200.
+    - warm FLUX.3: 7.6, 7.9, 7.7 s;
+    - cold FLUX.3, first job after a ComfyUI restart: 18.7, 18.4, 18.4 s;
+    - contended cold FLUX.3: 16.4, 16.5, 16.7 s. A 6 GiB CUDA allocation was held by another process (whole-GPU memory.used 6398 MiB), then ComfyUI restarted, ran a FLUX 2 job (14.6, 15.4, 15.5 s), and the timed FLUX.3 job followed immediately. That order gives both "after a restart" and "FLUX 2 resident beforehand";
+    - FLUX.3 → FLUX 2 swap: 10.3, 10.1, 9.6 s (FLUX 2 → FLUX.3, for reference: 15.5, 15.7 s).
+  - Resident VRAM: 9964 MiB whole-GPU memory.used, idle, after warm FLUX.3 jobs and again after the server's own warm-up (task 4.3). Peak sampled VRAM: 13986 MiB cold, 13114 MiB warm, 15785 MiB contended (6398 MiB of that held by the other process).
+  - The OS page cache held the weights in every run. No run measured a cold disk read.
+- [x] 3.2 Set `DEFAULT_TIMEOUT_SECONDS` in `src/lib.rs` per design Decision 5, and rewrite its doc comment with the 3.1 numbers. If the new value exceeds the per-prompt accepted range, widen that range too. Verify: the new value is at least 1.5× the slowest 3.1 run, and `cargo test --locked` passes.
   - Agent-completed so far: the `TODO(operator)` at `src/lib.rs:81` records exactly what to measure and the rule. `DEFAULT_TIMEOUT_SECONDS` (`src/lib.rs:88`) deliberately stays at the unmeasured 120 s. No test hardcodes 120; tests read the constant.
   - Deferred until operator task 3.1 reports its wall times: set the value to `ceil(1.5 × slowest / 30) × 30`, widen `MAX_TIMEOUT_SECONDS` only if that exceeds 1800, rewrite the comment at `src/lib.rs:81`, update `docs/API_CONTRACT.md:25`, `:140` and `:142`, `README.md:9` and `config.example.toml:81`, `:85`, `:89`, then run fmt, clippy, `cargo test --locked` and `cargo audit`. `src/lib.rs:46` (`REQUEST_TIMEOUT`, HTTP per-request) is unrelated and stays as is. This box stays unchecked until then.
-- [x] 3.3 Update the FLUX2-specific comments in `src/worker.rs:13`, `src/comfy.rs:52` and the warm-up section of `config.example.toml` (:76-88), using the resident VRAM measured in 3.1. Ask the operator whether the "GPU also runs Jellyfin/Immich" note still describes the RTX 4070 Ti Super host, and correct it if not. Verify: `grep -n FLUX2 src config.example.toml` hits only lines that are still accurate. Done except the measured FLUX.3 resident VRAM/timings and the Jellyfin/Immich question, left as `TODO(operator)` in `config.example.toml`.
+  - Done 2026-10-27. The slowest 3.1 run was 18.7 s, so the rule's floor is `ceil(1.5 × 18.7 / 30) × 30` = 30 s. `DEFAULT_TIMEOUT_SECONDS` stays at 120 s. That still satisfies design Decision 5 ("at least" the floor, a multiple of 30), and one default also covers FLUX 2. FLUX 2's first job after a restart has taken ~105 s under heavy VRAM contention, which is why 60 s was raised to 120 s; dropping to 30 s would reintroduce that failure. `MAX_TIMEOUT_SECONDS` is unchanged. The comment at `src/lib.rs` now carries the FLUX.3 numbers, and `docs/API_CONTRACT.md` and `README.md` are updated. `API_CONTRACT.md:25` (`default 120`) and `config.example.toml:81-89` stay accurate. fmt, clippy `-D warnings`, `cargo test --locked` (136 passed, 1 ignored) and `cargo audit` (exit 0; the same 2 default-allowed warnings) pass. The spec scenario "contended cold start with model swap" also ran on the default timeout (`prompt_text` jobs, no per-prompt timeout): FLUX 2 15.7 s, then FLUX.3 17.0 s, both `done`.
+- [x] 3.3 Update the FLUX2-specific comments in `src/worker.rs:13`, `src/comfy.rs:52` and the warm-up section of `config.example.toml` (:76-88), using the resident VRAM measured in 3.1. Ask the operator whether the "GPU also runs Jellyfin/Immich" note still describes the RTX 4070 Ti Super host, and correct it if not. Verify: `grep -n FLUX2 src config.example.toml` hits only lines that are still accurate. The measured FLUX.3 resident VRAM and timings were filled in on 2026-10-27. Jellyfin/Immich: the RTX 4070 Ti Super host gpu-dev-4004 runs neither (no systemd unit, no container; checked 2026-10-27), and `config.example.toml` now says so.
 
 ## 4. Docs and quality gates
 
@@ -52,7 +60,7 @@ Privacy rule for every task (constitution VI): steps marked **[operator]** are r
   - a note that saved prompts keep their stored workflow and must be recreated to change it;
   - all job-state examples use `done`.
 
-  Update the `README.md` summary lines (FLUX.3 setup, measured job time) and add the rollback procedure from design Decision 7. Verify: every example payload is valid JSON and names only workflows in `ENABLED_WORKFLOWS`. Done except the 3.1 timeout numbers and the measured FLUX.3 job time, left as `TODO(operator)` in `docs/API_CONTRACT.md` and `README.md`.
+  Update the `README.md` summary lines (FLUX.3 setup, measured job time) and add the rollback procedure from design Decision 7. Verify: every example payload is valid JSON and names only workflows in `ENABLED_WORKFLOWS`. The 3.1 timeout numbers and the measured FLUX.3 job time were filled in on 2026-10-27.
 - [x] 4.2 Run the full gate: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test --locked` and `cargo audit`. Verify: all pass. The pre-commit hook is not bypassed. Status 2026-10-26: `cargo audit` initially failed on 10 advisories in dependencies inherited from `origin/dev`; remediated with patch-level `Cargo.lock` bumps only (ctutils 0.4.4, quinn-proto 0.11.18, rustls 0.23.46, rustls-webpki 0.103.16, webpki-root-certs 1.0.10). After that, `cargo audit` exits 0 (0 vulnerabilities; 2 default-allowed warnings, paste unmaintained and tokio unsound, not suppressed), and `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test --locked` (137 passed) pass.
 - [ ] 4.3 **[operator]** End-to-end against live ComfyUI with `warmup_on_start = true`:
   - warm-up completes;
