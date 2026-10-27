@@ -15,24 +15,24 @@ chrono = { version = "0.4.45", features = ["serde"] }
 futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
 image = { version = "0.25.10", default-features = false, features = ["avif", "jpeg", "png"] }
 include_dir = "0.7.4"
-parking_lot = "0.12.5"
-rand = "0.10.2"
-reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "json", "multipart", "query", "http2", "charset"] }
+parking_lot = "0.13.0"
+rand = "0.10.3"
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "json", "multipart", "query", "http2", "charset"] }
 serde = { version = "1.0.229", features = ["derive"] }
-sha2 = "0.11.0"
-toml = "1.1.5"
-serde_json = "1.0.151"
+sha2 = "0.11.1"
+toml = "1.1.8"
+serde_json = "1.0.154"
 sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "sqlite", "macros", "migrate", "chrono"] }
 subtle = "2.6.1"
-thiserror = "2.0.20"
-tokio = { version = "1.53.1", features = ["full"] }
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["full"] }
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect"] }
-tokio-util = { version = "0.7.19", features = ["io"] }
+tokio-util = { version = "0.7.20", features = ["io"] }
 tower = { version = "0.5.3", features = ["util"] }
 tower-http = { version = "0.7.1", features = ["trace", "sensitive-headers", "timeout"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
-uuid = { version = "1.26.0", features = ["v4", "serde"] }
+uuid = { version = "1.29.0", features = ["v4", "serde"] }
 
 [dev-dependencies]
 http-body-util = "0.1.5"
