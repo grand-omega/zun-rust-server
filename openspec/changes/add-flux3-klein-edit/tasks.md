@@ -62,12 +62,13 @@ Privacy rule for every task (constitution VI): steps marked **[operator]** are r
 
   Update the `README.md` summary lines (FLUX.3 setup, measured job time) and add the rollback procedure from design Decision 7. Verify: every example payload is valid JSON and names only workflows in `ENABLED_WORKFLOWS`. The 3.1 timeout numbers and the measured FLUX.3 job time were filled in on 2026-10-27.
 - [x] 4.2 Run the full gate: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test --locked` and `cargo audit`. Verify: all pass. The pre-commit hook is not bypassed. Status 2026-10-26: `cargo audit` initially failed on 10 advisories in dependencies inherited from `origin/dev`; remediated with patch-level `Cargo.lock` bumps only (ctutils 0.4.4, quinn-proto 0.11.18, rustls 0.23.46, rustls-webpki 0.103.16, webpki-root-certs 1.0.10). After that, `cargo audit` exits 0 (0 vulnerabilities; 2 default-allowed warnings, paste unmaintained and tokio unsound, not suppressed), and `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test --locked` (137 passed) pass.
-- [ ] 4.3 **[operator]** End-to-end against live ComfyUI with `warmup_on_start = true`:
+- [x] 4.3 **[operator]** End-to-end against live ComfyUI with `warmup_on_start = true`:
   - warm-up completes;
   - `GET /api/v1/capabilities` shows FLUX.3 as default;
   - one `POST /api/v1/jobs` each with `flux3_klein_edit` and `flux2_klein_edit` reaches `done` and its result download returns 200.
 
   Verify: the operator reports the status codes and job states.
+  - Done 2026-10-27 on gpu-dev-4004 against the staging server (this branch) and staging ComfyUI v0.42.4 (:8189) with `warmup_on_start = true`. Warm-up completed (`warmup.done` logged once, no failure) 20.7 s after server start, and 9964 MiB was in use after it. `GET /health` returned 200. `GET /capabilities` returned 200 and listed `flux2_klein_edit` (default false) and `flux3_klein_edit` ("FLUX 3 klein", default true). `POST /jobs` returned 202 for each workflow, and both jobs reached `done` (`flux3_klein_edit` 7.9 s, `flux2_klein_edit` 10.5 s). Each `GET /jobs/{id}/result` returned 200.
 
 ## Workflow follow-up
 
