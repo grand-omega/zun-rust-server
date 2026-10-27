@@ -62,6 +62,12 @@ Privacy rule for every task (constitution VI): steps marked **[operator]** are r
     - Results: all three FLUX.3 jobs reached `done` (submit 202, result 200) in 23.9, 23.7 and 23.7 s, peak VRAM 15783 MiB. That is well inside 120 s, and 120 s is at least 1.5 × 23.9 s.
     - Records: `~/grand-omega-flux3/.artifacts/2026-10-27-flux3-validation/windows/w5-spec47-*/` on gpu-dev-4004.
 - [x] 3.3 Update the FLUX2-specific comments in `src/worker.rs:13`, `src/comfy.rs:52` and the warm-up section of `config.example.toml` (:76-88), using the resident VRAM measured in 3.1. Ask the operator whether the "GPU also runs Jellyfin/Immich" note still describes the RTX 4070 Ti Super host, and correct it if not. Verify: `grep -n FLUX2 src config.example.toml` hits only lines that are still accurate. The measured FLUX.3 resident VRAM and timings were filled in on 2026-10-27. Jellyfin/Immich: the RTX 4070 Ti Super host gpu-dev-4004 runs neither (no systemd unit, no container; checked 2026-10-27), and `config.example.toml` now says so.
+  - Completed after review, 2026-10-27. Two warm-up comments still gave FLUX 2 figures as current: `src/worker.rs` (`spawn_warmup`) said "~20 s… ~4 GB… ~3 s", and `src/config.rs` (`warmup_on_start`) did the same and also named the Arc B580 Jellyfin/Immich machine as the deployment host.
+    - Both comments now give the measured FLUX.3 numbers: 18.4–21.3 s cold versus 7.6–7.9 s warm, and 9964 MiB after warm-up.
+    - They mark the FLUX 2 figures and the Arc B580 host as historical, and say the production host runs neither Jellyfin nor Immich.
+  - Verify: `grep -n "FLUX2\|FLUX 2\|B580\|Jellyfin\|~4 GB" src config.example.toml` now hits only accurate lines: historical or FLUX 2-as-second-workflow notes, display names, a test, and the corrected Jellyfin/Immich note.
+  - Comment-only: no non-comment line in `src/` differs from the measured exact build `6b51a1e`, so the 3.1/4.3 measurements and their provenance stand.
+  - Gates on this tree pass: fmt and clippy `-D warnings` exit 0; `cargo test --locked` 136 passed, 0 failed, 1 ignored; `cargo audit` exit 0 with the same 2 allowed warnings. The transcript is `server-provenance/gates-task3.3-comments.txt` in the artifacts directory.
 
 ## 4. Docs and quality gates
 
