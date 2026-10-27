@@ -48,3 +48,4 @@ The constitution requires every change to pass `cargo fmt --check`, `cargo clipp
 ## Follow-ups
 
 - Optional: add `renovate.json`, mirroring the Android app's, so crate updates arrive as weekly PRs.
+- Task 2.1 is pending verification. `.github/workflows/rust.yml` now uses `actions/checkout@v7`, the latest major (v7.0.1), and the file parses as YAML. The task's Verify, a passing CI run on the PR, can only happen once the branch is pushed and a PR is opened, so 2.1 stays unchecked until then.
